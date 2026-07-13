@@ -23,6 +23,15 @@ button,input,select,textarea{font:inherit}button{color:var(--text);background:rg
 .cloud-danger{color:#ffd0db}
 @media(max-width:780px){.cloud-grid{grid-template-columns:1fr}}
 
+
+/* v14: Supabase sync diagnostics */
+.cloud-ok{color:#83efb4}.cloud-warn{color:#ffd17b}.cloud-mini{font-size:.71rem;color:var(--muted);line-height:1.45;margin-top:6px}.cloud-mode{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--line);border-radius:999px;padding:4px 8px;background:rgba(255,255,255,.035);font-size:.7rem;color:var(--muted)}
+
+
+/* v15: Direct table sync fallback */
+.cloud-direct{border:1px solid rgba(131,239,180,.28);background:rgba(131,239,180,.055);color:#c9f8dc;border-radius:12px;padding:10px;margin:10px 0;font-size:.76rem;line-height:1.5}
+.cloud-direct b{color:#e5ffef}
+
 </style>
 </head>
 <body>
@@ -450,6 +459,133 @@ document.addEventListener('click',async e=>{
 },true);
 
 cloudCfg();
+
+
+/* v14: Supabase sync diagnostics + pull clarity */
+cloudDefaults=function(){return {url:'',anonKey:'',syncKey:'',auto:false,autoPull:false,verifyAfterUpload:true,lastRemoteAt:'',lastVerifiedAt:'',lastStatus:'연결 전',lastUploadBytes:0};};
+cloudCfg=function(){state.settings.supabaseSync={...cloudDefaults(),...(state.settings.supabaseSync||{})};return state.settings.supabaseSync;};
+function cloudStateSummary(){const c=cloudCfg(),linked=!!(c.url&&c.anonKey&&c.syncKey);return `${linked?'연결 정보 저장됨':'연결 정보 없음'} · 자동저장 ${c.auto?'ON':'OFF'} · 접속 시 불러오기 ${c.autoPull?'ON':'OFF'}`;}
+cloudPanel=function(){const c=cloudCfg();return `<section class="panel"><div class="panel-head"><div><div class="panel-title">Supabase 원격 동기화 · 로그인 없음 <span class="cloud-mode">v14 진단형</span></div><div class="panel-note">이 기능은 실시간 동시편집이 아니라 <b>원격 저장 → 원격 불러오기</b> 방식이다. 다른 기기에서는 같은 동기화 키로 <b>원격 불러오기</b>를 눌러야 반영된다.</div></div></div><div class="panel-body"><div class="notice">현재 방식: localStorage가 원본이고, Supabase는 암호화 백업/동기화 저장소다. 원격 저장 후 자동으로 다른 기기의 화면이 바뀌는 실시간 동기화는 아니다.</div><div class="cloud-grid"><div class="setting"><label>Supabase Project URL</label><input id="sbUrl" placeholder="https://xxxxx.supabase.co" value="${cloudEsc(c.url)}"><div class="help">프로젝트 URL. 끝의 / 는 자동 제거됨.</div></div><div class="setting"><label>Anon / Publishable Key</label><input id="sbAnonKey" type="password" placeholder="eyJ..." value="${cloudEsc(c.anonKey)}"><div class="help">service_role key는 절대 넣지 않는다.</div></div><div class="setting cloud-wide"><label>동기화 키</label><input id="sbSyncKey" type="password" placeholder="길고 예측 불가능한 문장/키를 입력" value="${cloudEsc(c.syncKey)}"><div class="help">같은 키를 입력한 기기끼리만 같은 원격 데이터를 본다. 다른 키면 완전히 다른 저장소처럼 동작한다.</div></div><div class="setting"><label>자동 원격 저장</label><select id="sbAuto"><option value="false" ${!c.auto?'selected':''}>OFF · 수동 저장</option><option value="true" ${c.auto?'selected':''}>ON · 로컬 저장 후 자동 업로드</option></select><div class="help">이건 업로드 자동화다. 다른 기기에서 자동으로 내려받는 기능은 아님.</div></div><div class="setting"><label>접속 시 원격 불러오기</label><select id="sbAutoPull"><option value="false" ${!c.autoPull?'selected':''}>OFF · 수동 불러오기</option><option value="true" ${c.autoPull?'selected':''}>ON · 앱 열 때 원격 적용</option></select><div class="help">ON이면 접속 시 원격 데이터로 현재 브라우저 상태를 덮어쓴다.</div></div><div class="setting"><label>저장 후 검증</label><select id="sbVerify"><option value="true" ${c.verifyAfterUpload!==false?'selected':''}>ON · 저장 직후 원격 재조회</option><option value="false" ${c.verifyAfterUpload===false?'selected':''}>OFF</option></select><div class="help">원격 저장이 실제 DB에 들어갔는지 바로 확인한다.</div></div><div class="setting"><label>원격 상태</label><div class="cloud-status" id="cloudStatus">${cloudEsc(c.lastStatus||'연결 전')}<br><span class="cloud-mini">${cloudEsc(cloudStateSummary())}</span>${c.lastRemoteAt?`<br>마지막 원격 시각: ${cloudEsc(c.lastRemoteAt)}`:''}${c.lastVerifiedAt?`<br>마지막 검증 시각: ${cloudEsc(c.lastVerifiedAt)}`:''}${c.lastUploadBytes?`<br>마지막 업로드 크기: ${Number(c.lastUploadBytes).toLocaleString()} bytes`:''}</div></div></div><div class="cloud-actions"><button data-cloud-action="save-config" class="primary">연결 정보 저장</button><button data-cloud-action="gen-key">동기화 키 생성</button><button data-cloud-action="upload">원격 저장</button><button data-cloud-action="download">원격 불러오기</button><button data-cloud-action="check-remote">원격 상태 확인</button><button data-cloud-action="copy-sql">SQL 복사</button><button data-cloud-action="clear-config" class="danger">연결 정보 삭제</button></div><div class="cloud-status"><b>연동 테스트 순서</b><br>1) A기기에서 개념 하나 수정 → 2) A기기에서 원격 저장 → 3) B기기에서 같은 URL/anon key/동기화 키 입력 → 4) B기기에서 원격 불러오기. 이 순서가 되어야 데이터가 보인다.</div><pre class="cloud-sql" id="cloudSql">${cloudEsc(CLOUD_SQL)}</pre><div class="cloud-status cloud-danger">주의: 동기화 키가 다르면 저장 위치가 달라진다. GitHub Pages 주소가 다르거나 Notion iframe 저장소가 분리된 경우에도 로컬 저장은 별도로 보일 수 있으므로 원격 불러오기로 맞춰야 한다.</div></div></section>`;};
+renderSettings=function(){return v13BaseRenderSettings()+cloudPanel();};
+const v14BaseCloudReadInputs=cloudReadInputs;cloudReadInputs=function(){const c=v14BaseCloudReadInputs();c.autoPull=($('#sbAutoPull')?.value==='true');c.verifyAfterUpload=($('#sbVerify')?.value!=='false');return c;};
+function cloudUpdateStatusBox(){const c=cloudCfg(),el=$('#cloudStatus');if(el)el.innerHTML=cloudEsc(c.lastStatus||'')+`<br><span class="cloud-mini">${cloudEsc(cloudStateSummary())}</span>`+(c.lastRemoteAt?`<br>마지막 원격 시각: ${cloudEsc(c.lastRemoteAt)}`:'')+(c.lastVerifiedAt?`<br>마지막 검증 시각: ${cloudEsc(c.lastVerifiedAt)}`:'')+(c.lastUploadBytes?`<br>마지막 업로드 크기: ${Number(c.lastUploadBytes).toLocaleString()} bytes`:'');}
+cloudSetStatus=function(msg,remoteAt=''){const c=cloudCfg();c.lastStatus=msg;if(remoteAt)c.lastRemoteAt=remoteAt;localStorage.setItem(APP_KEY,JSON.stringify(state));cloudUpdateStatusBox();const chip=$('#saveChip');if(chip)chip.textContent=msg;};
+function v14SnapshotSize(payload){try{return new TextEncoder().encode(JSON.stringify(payload)).length}catch{return JSON.stringify(payload).length}}
+async function cloudFetchRemoteRow(){const c=cloudNeedConfig();if(!c)return null;const ids=await cloudIds(c.syncKey);const result=await cloudRpc('load_learning_os_snapshot',{p_sync_id:ids.sync_id});return Array.isArray(result)?result[0]:null;}
+cloudUploadNow=async function(){const c=cloudNeedConfig();if(!c)return;const payload=snapshotPayload();c.lastUploadBytes=v14SnapshotSize(payload);cloudSetStatus('원격 저장 중...');const ids=await cloudIds(c.syncKey);const encrypted=await encryptSnapshot(payload,c.syncKey);const result=await cloudRpc('save_learning_os_snapshot',{p_sync_id:ids.sync_id,p_write_hash:ids.write_hash,p_encrypted_state:encrypted.encrypted_state,p_salt:encrypted.salt,p_iv:encrypted.iv});const at=Array.isArray(result)&&result[0]?.updated_at?result[0].updated_at:new Date().toISOString();cloudSetStatus('원격 저장 완료',at);if(c.verifyAfterUpload!==false){const row=await cloudFetchRemoteRow();if(!row)throw new Error('저장 직후 원격 조회 결과가 비어 있음');await decryptSnapshot(row,c.syncKey);c.lastVerifiedAt=new Date().toISOString();cloudSetStatus('원격 저장 완료 · 검증 완료',row.updated_at||at)}showToast('Supabase 원격 저장/검증 완료.');};
+cloudDownloadNow=async function(){const c=cloudNeedConfig();if(!c)return;cloudSetStatus('원격 불러오는 중...');const row=await cloudFetchRemoteRow();if(!row){cloudSetStatus('원격 데이터 없음');showToast('이 동기화 키로 저장된 원격 데이터가 없어.');return;}const payload=await decryptSnapshot(row,c.syncKey);applySnapshotPayload(payload);cloudSetStatus('원격 불러오기 완료',row.updated_at||new Date().toISOString());showToast('원격 데이터를 이 브라우저에 적용했어. Atlas 화면이면 탭을 다시 열어 확인해줘.');};
+async function cloudCheckRemote(){const c=cloudNeedConfig();if(!c)return;cloudSetStatus('원격 상태 확인 중...');const row=await cloudFetchRemoteRow();if(!row){cloudSetStatus('원격 데이터 없음');showToast('원격 데이터가 아직 없어. 먼저 원격 저장을 눌러.');return;}const payload=await decryptSnapshot(row,c.syncKey);const size=v14SnapshotSize(payload);c.lastVerifiedAt=new Date().toISOString();c.lastUploadBytes=size;cloudSetStatus(`원격 데이터 확인 완료 · ${size.toLocaleString()} bytes`,row.updated_at||'');showToast('원격 데이터가 실제로 존재하고 복호화까지 됐어.');}
+let v14StartupPullDone=false;function v14TryStartupPull(){if(v14StartupPullDone)return;v14StartupPullDone=true;const c=cloudCfg();if(c.autoPull&&c.url&&c.anonKey&&c.syncKey)setTimeout(()=>cloudDownloadNow().catch(err=>cloudSetStatus('접속 시 원격 불러오기 실패: '+err.message)),900)}
+const v14BaseRender=render;render=function(){v14BaseRender();v14TryStartupPull();};
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-cloud-action="check-remote"]');if(!b)return;e.preventDefault();try{cloudReadInputs();await cloudCheckRemote()}catch(err){cloudSetStatus('원격 상태 확인 실패: '+err.message);showToast('원격 상태 확인 실패: '+err.message)}},true);
+
+
+/* v15: Direct Table REST sync - avoids RPC schema cache mismatch */
+const CLOUD_SQL_V15 = '-- Learning OS v15: 로그인 없는 Direct Table 암호화 동기화용 Supabase SQL\n-- Supabase Dashboard → SQL Editor에서 한 번만 실행\n-- 기존 RPC 방식 대신 REST table upsert/select를 사용하므로 schema cache 함수 문제를 피한다.\n\ncreate table if not exists public.learning_os_snapshots (\n  sync_id text primary key,\n  write_hash text not null,\n  encrypted_state text not null,\n  salt text not null,\n  iv text not null,\n  updated_at timestamptz not null default now(),\n  app_version text not null default \'v15\'\n);\n\nalter table public.learning_os_snapshots enable row level security;\n\ngrant select, insert, update on public.learning_os_snapshots to anon;\n\ndrop policy if exists "learning_os_anon_select_encrypted" on public.learning_os_snapshots;\ndrop policy if exists "learning_os_anon_insert_encrypted" on public.learning_os_snapshots;\ndrop policy if exists "learning_os_anon_update_encrypted" on public.learning_os_snapshots;\n\n-- 로그인 없는 개인용 암호화 저장소 정책.\n-- 데이터 본문은 브라우저에서 AES-GCM으로 암호화되어 저장된다.\n-- sync_id는 동기화 키의 SHA-256 파생값이라 사실상 개인 저장소 주소 역할을 한다.\ncreate policy "learning_os_anon_select_encrypted"\non public.learning_os_snapshots\nfor select\nto anon\nusing (true);\n\ncreate policy "learning_os_anon_insert_encrypted"\non public.learning_os_snapshots\nfor insert\nto anon\nwith check (true);\n\ncreate policy "learning_os_anon_update_encrypted"\non public.learning_os_snapshots\nfor update\nto anon\nusing (true)\nwith check (true);\n\nnotify pgrst, \'reload schema\';\n';
+function cloudPanel(){
+  const c=cloudCfg();
+  return `<section class="panel"><div class="panel-head"><div><div class="panel-title">Supabase 원격 동기화 · 로그인 없음 <span class="cloud-mode">v15 Direct Table</span></div><div class="panel-note">RPC 함수 방식에서 schema cache 문제가 생겨서, v15는 <b>테이블 직접 저장/조회</b> 방식으로 바꿨다.</div></div></div><div class="panel-body">
+    <div class="cloud-direct"><b>이번 버전 핵심:</b> 원격 저장은 <code>learning_os_snapshots</code> 테이블에 직접 upsert하고, 원격 불러오기는 같은 <code>sync_id</code> 행을 직접 조회한다. 그래서 <b>save_learning_os_snapshot 함수를 찾을 수 없음</b> 문제를 피한다.</div>
+    <div class="notice">데이터 내용은 동기화 키로 브라우저에서 AES-GCM 암호화된 뒤 저장된다. 단, 로그인 없는 방식이라 암호화된 row 자체는 anon key로 접근 가능한 구조다. 개인용 백업/동기화 용도로 쓰는 걸 전제로 한다.</div>
+    <div class="cloud-grid">
+      <div class="setting"><label>Supabase Project URL</label><input id="sbUrl" placeholder="https://xxxxx.supabase.co" value="${cloudEsc(c.url)}"><div class="help">프로젝트 URL. 끝의 / 는 자동 제거됨.</div></div>
+      <div class="setting"><label>Anon / Publishable Key</label><input id="sbAnonKey" type="password" placeholder="eyJ..." value="${cloudEsc(c.anonKey)}"><div class="help">service_role key는 절대 넣지 않는다.</div></div>
+      <div class="setting cloud-wide"><label>동기화 키</label><input id="sbSyncKey" type="password" placeholder="길고 예측 불가능한 문장/키를 입력" value="${cloudEsc(c.syncKey)}"><div class="help">같은 동기화 키 = 같은 원격 저장소. 한 글자라도 다르면 저장된 데이터 없음으로 보인다.</div></div>
+      <div class="setting"><label>자동 원격 저장</label><select id="sbAuto"><option value="false" ${!c.auto?'selected':''}>OFF · 수동 저장</option><option value="true" ${c.auto?'selected':''}>ON · 로컬 저장 후 자동 업로드</option></select></div>
+      <div class="setting"><label>접속 시 원격 불러오기</label><select id="sbAutoPull"><option value="false" ${!c.autoPull?'selected':''}>OFF · 수동 불러오기</option><option value="true" ${c.autoPull?'selected':''}>ON · 앱 열 때 원격 적용</option></select></div>
+      <div class="setting"><label>저장 후 검증</label><select id="sbVerify"><option value="true" ${c.verifyAfterUpload!==false?'selected':''}>ON · 저장 직후 원격 재조회</option><option value="false" ${c.verifyAfterUpload===false?'selected':''}>OFF</option></select></div>
+      <div class="setting"><label>원격 상태</label><div class="cloud-status" id="cloudStatus">${cloudEsc(c.lastStatus||'연결 전')}<br><span class="cloud-mini">${cloudEsc(cloudStateSummary())}</span>${c.lastRemoteAt?`<br>마지막 원격 시각: ${cloudEsc(c.lastRemoteAt)}`:''}${c.lastVerifiedAt?`<br>마지막 검증 시각: ${cloudEsc(c.lastVerifiedAt)}`:''}${c.lastUploadBytes?`<br>마지막 업로드 크기: ${Number(c.lastUploadBytes).toLocaleString()} bytes`:''}</div></div>
+    </div>
+    <div class="cloud-actions">
+      <button data-cloud-action="save-config" class="primary">연결 정보 저장</button>
+      <button data-cloud-action="gen-key">동기화 키 생성</button>
+      <button data-cloud-action="upload">원격 저장</button>
+      <button data-cloud-action="download">원격 불러오기</button>
+      <button data-cloud-action="check-remote">원격 상태 확인</button>
+      <button data-cloud-action="copy-sql-v15">v15 SQL 복사</button>
+      <button data-cloud-action="clear-config" class="danger">연결 정보 삭제</button>
+    </div>
+    <div class="cloud-status"><b>반드시 새 SQL 실행</b><br>아래 v15 SQL을 Supabase SQL Editor에 다시 실행해야 한다. 기존 RPC SQL만 실행한 상태면 Direct Table 방식이 동작하지 않는다.</div>
+    <pre class="cloud-sql" id="cloudSql">${cloudEsc(CLOUD_SQL_V15)}</pre>
+  </div></section>`;
+}
+async function cloudDirectGetRow(sync_id){
+  const c=cloudNeedConfig(); if(!c)return null;
+  const url=`${c.url}/rest/v1/learning_os_snapshots?sync_id=eq.${encodeURIComponent(sync_id)}&select=encrypted_state,salt,iv,updated_at,app_version`;
+  const res=await fetch(url,{headers:{'apikey':c.anonKey,'Authorization':`Bearer ${c.anonKey}`,'Accept':'application/json'}});
+  const text=await res.text(); let json=null; try{json=text?JSON.parse(text):null}catch{json=text}
+  if(!res.ok)throw new Error(typeof json==='string'?json:(json?.message||`HTTP ${res.status}`));
+  return Array.isArray(json)?json[0]:null;
+}
+async function cloudFetchRemoteRow(){
+  const c=cloudNeedConfig(); if(!c)return null;
+  const ids=await cloudIds(c.syncKey);
+  return cloudDirectGetRow(ids.sync_id);
+}
+cloudUploadNow=async function(){
+  const c=cloudNeedConfig(); if(!c)return;
+  const payload=snapshotPayload();
+  c.lastUploadBytes=v14SnapshotSize? v14SnapshotSize(payload) : JSON.stringify(payload).length;
+  cloudSetStatus('원격 저장 중 · Direct Table...');
+  const ids=await cloudIds(c.syncKey);
+  const encrypted=await encryptSnapshot(payload,c.syncKey);
+  const row={sync_id:ids.sync_id,write_hash:ids.write_hash,encrypted_state:encrypted.encrypted_state,salt:encrypted.salt,iv:encrypted.iv,updated_at:new Date().toISOString(),app_version:'v15'};
+  const res=await fetch(`${c.url}/rest/v1/learning_os_snapshots?on_conflict=sync_id`,{
+    method:'POST',
+    headers:{
+      'apikey':c.anonKey,
+      'Authorization':`Bearer ${c.anonKey}`,
+      'Content-Type':'application/json',
+      'Prefer':'resolution=merge-duplicates,return=representation'
+    },
+    body:JSON.stringify(row)
+  });
+  const text=await res.text(); let json=null; try{json=text?JSON.parse(text):null}catch{json=text}
+  if(!res.ok)throw new Error(typeof json==='string'?json:(json?.message||`HTTP ${res.status}`));
+  const saved=Array.isArray(json)?json[0]:null;
+  const at=saved?.updated_at||row.updated_at;
+  cloudSetStatus('원격 저장 완료 · Direct Table',at);
+  if(c.verifyAfterUpload!==false){
+    const remote=await cloudDirectGetRow(ids.sync_id);
+    if(!remote)throw new Error('저장 직후에도 해당 sync_id 행을 찾지 못함. v15 SQL/RLS 정책을 확인해야 함.');
+    await decryptSnapshot(remote,c.syncKey);
+    c.lastVerifiedAt=new Date().toISOString();
+    cloudSetStatus('원격 저장 완료 · 재조회/복호화 검증 완료',remote.updated_at||at);
+  }
+  showToast('Supabase 원격 저장/검증 완료.');
+};
+cloudDownloadNow=async function(){
+  const c=cloudNeedConfig(); if(!c)return;
+  cloudSetStatus('원격 불러오는 중 · Direct Table...');
+  const ids=await cloudIds(c.syncKey);
+  const row=await cloudDirectGetRow(ids.sync_id);
+  if(!row){
+    cloudSetStatus('원격 데이터 없음 · 같은 동기화 키로 먼저 원격 저장해야 함');
+    showToast('저장된 데이터가 없어. 같은 동기화 키인지, v15 SQL을 실행했는지 확인해.');
+    return;
+  }
+  const payload=await decryptSnapshot(row,c.syncKey);
+  applySnapshotPayload(payload);
+  cloudSetStatus('원격 불러오기 완료 · Direct Table',row.updated_at||new Date().toISOString());
+  showToast('원격 데이터를 이 브라우저에 적용했어.');
+};
+async function cloudCheckRemote(){
+  const c=cloudNeedConfig(); if(!c)return;
+  cloudSetStatus('원격 상태 확인 중 · Direct Table...');
+  const ids=await cloudIds(c.syncKey);
+  const row=await cloudDirectGetRow(ids.sync_id);
+  if(!row){cloudSetStatus('원격 데이터 없음 · 이 동기화 키의 행이 없음');showToast('해당 동기화 키로 저장된 row가 없어. 먼저 원격 저장을 눌러.');return;}
+  const payload=await decryptSnapshot(row,c.syncKey);
+  const size=v14SnapshotSize? v14SnapshotSize(payload) : JSON.stringify(payload).length;
+  c.lastVerifiedAt=new Date().toISOString(); c.lastUploadBytes=size;
+  cloudSetStatus(`원격 데이터 확인 완료 · ${size.toLocaleString()} bytes · ${row.app_version||'unknown'}`,row.updated_at||'');
+  showToast('원격 데이터가 존재하고 복호화까지 성공했어.');
+}
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-cloud-action="copy-sql-v15"]'); if(!b)return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  try{await navigator.clipboard.writeText(CLOUD_SQL_V15);showToast('v15 Supabase SQL을 복사했어.')}catch{showToast('복사 실패. 아래 SQL을 직접 선택해서 복사해.')}
+},true);
 
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-action],[data-tab]');if(!b)return;
