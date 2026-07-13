@@ -225,6 +225,232 @@ function dateModal(id){const p=pOf(id);openModal(`<div class="modal"><div class=
 function noteModal(id){openModal(`<div class="modal"><div class="modal-head"><b>${esc(itemById(id).id)} · ${esc(itemById(id).name)} — 오류/보완 메모</b><button class="small" data-action="close-modal">닫기</button></div><div class="modal-body"><div class="item-sub" style="margin-bottom:10px">${esc(itemById(id).typeCode)} · 권장 산출물 ${esc(itemById(id).recommendedAction||'—')}</div><label>오류 유형, 혼동쌍, 다음 재시험 때 확인할 포인트</label><textarea id="modalNote" placeholder="예: LEFT JOIN에서 WHERE 조건 위치를 반대로 기억함">${esc(state.notes[id]||'')}</textarea></div><div class="modal-foot"><span class="grow"></span><button class="primary" data-action="save-note" data-id="${id}">메모 저장</button></div></div>`)}
 function exportData(){const payload={version:4,app:state,bridge:bridge()};const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`정처기_LearningOS_백업_${state.activeDate}.json`;a.click();URL.revokeObjectURL(a.href);showToast('통합 백업을 내보냈어.')}
 function importData(file){const reader=new FileReader();reader.onload=()=>{try{const data=JSON.parse(reader.result);if(data.app){state=mergeState(defaultState(),data.app);if(data.bridge)localStorage.setItem(BRIDGE_KEY,JSON.stringify(data.bridge));}else{state=mergeState(defaultState(),data)}save('백업 불러옴');render();showToast('백업을 불러왔어.')}catch{showToast('백업 형식을 읽지 못했어.')}};reader.readAsText(file)}
+
+/* v13 JS: Supabase no-login encrypted sync UI */
+const ATLAS_STORAGE='concept-atlas-v3-feed';
+const CLOUD_SQL = "-- Learning OS: 로그인 없는 암호화 동기화용 Supabase SQL\n-- Supabase Dashboard → SQL Editor에서 한 번만 실행\n\ncreate table if not exists public.learning_os_snapshots (\n  sync_id text primary key,\n  write_hash text not null,\n  encrypted_state text not null,\n  salt text not null,\n  iv text not null,\n  updated_at timestamptz not null default now(),\n  app_version text not null default 'v13'\n);\n\nalter table public.learning_os_snapshots enable row level security;\n\n-- 테이블 직접 접근은 막고, 아래 RPC 함수만 anon으로 호출한다.\nrevoke all on public.learning_os_snapshots from anon, authenticated;\n\ncreate or replace function public.load_learning_os_snapshot(p_sync_id text)\nreturns table (\n  encrypted_state text,\n  salt text,\n  iv text,\n  updated_at timestamptz\n)\nlanguage sql\nsecurity definer\nset search_path = public\nas $$\n  select encrypted_state, salt, iv, updated_at\n  from public.learning_os_snapshots\n  where sync_id = p_sync_id\n  limit 1;\n$$;\n\ncreate or replace function public.save_learning_os_snapshot(\n  p_sync_id text,\n  p_write_hash text,\n  p_encrypted_state text,\n  p_salt text,\n  p_iv text\n)\nreturns table (updated_at timestamptz)\nlanguage plpgsql\nsecurity definer\nset search_path = public\nas $$\nbegin\n  if exists (\n    select 1\n    from public.learning_os_snapshots\n    where sync_id = p_sync_id\n      and write_hash <> p_write_hash\n  ) then\n    raise exception 'invalid sync key';\n  end if;\n\n  insert into public.learning_os_snapshots\n    (sync_id, write_hash, encrypted_state, salt, iv, updated_at, app_version)\n  values\n    (p_sync_id, p_write_hash, p_encrypted_state, p_salt, p_iv, now(), 'v13')\n  on conflict (sync_id) do update\n    set encrypted_state = excluded.encrypted_state,\n        salt = excluded.salt,\n        iv = excluded.iv,\n        updated_at = now(),\n        app_version = 'v13'\n    where public.learning_os_snapshots.write_hash = excluded.write_hash;\n\n  return query\n  select s.updated_at\n  from public.learning_os_snapshots s\n  where s.sync_id = p_sync_id;\nend;\n$$;\n\ngrant execute on function public.load_learning_os_snapshot(text) to anon;\ngrant execute on function public.save_learning_os_snapshot(text,text,text,text,text) to anon;";
+
+function cloudDefaults(){
+  return {url:'',anonKey:'',syncKey:'',auto:false,lastRemoteAt:'',lastStatus:'연결 전'};
+}
+function cloudCfg(){
+  state.settings.supabaseSync={...cloudDefaults(),...(state.settings.supabaseSync||{})};
+  return state.settings.supabaseSync;
+}
+function cloudEsc(s){return esc(String(s??''))}
+function cloudPanel(){
+  const c=cloudCfg();
+  return `<section class="panel"><div class="panel-head"><div><div class="panel-title">Supabase 원격 동기화 · 로그인 없음</div><div class="panel-note">계정 로그인 대신 <b>동기화 키</b>로 암호화 저장한다. 로컬 저장은 그대로 유지하고, 원격은 백업/기기간 이동용으로 붙인다.</div></div></div><div class="panel-body">
+    <div class="notice">구조: <b>localStorage 우선</b> → 원격 저장 시 전체 상태를 브라우저에서 AES-GCM으로 암호화 → Supabase에는 암호문만 저장. 같은 동기화 키를 넣은 기기에서만 복호화한다.</div>
+    <div class="cloud-grid">
+      <div class="setting"><label>Supabase Project URL</label><input id="sbUrl" placeholder="https://xxxxx.supabase.co" value="${cloudEsc(c.url)}"><div class="help">Supabase 프로젝트 Settings/API 또는 Project Settings에서 확인.</div></div>
+      <div class="setting"><label>Anon / Publishable Key</label><input id="sbAnonKey" type="password" placeholder="eyJ..." value="${cloudEsc(c.anonKey)}"><div class="help">브라우저에 넣는 공개 키. service_role key는 절대 넣지 않는다.</div></div>
+      <div class="setting cloud-wide"><label>동기화 키</label><input id="sbSyncKey" type="password" placeholder="길고 예측 불가능한 문장/키를 입력" value="${cloudEsc(c.syncKey)}"><div class="help">로그인 대신 쓰는 개인 암호. 이 키를 잃어버리면 원격 데이터를 복호화할 수 없다.</div></div>
+      <div class="setting"><label>자동 원격 저장</label><select id="sbAuto"><option value="false" ${!c.auto?'selected':''}>OFF · 수동 저장</option><option value="true" ${c.auto?'selected':''}>ON · 로컬 저장 후 자동 업로드</option></select><div class="help">기능 테스트 후 ON 권장.</div></div>
+      <div class="setting"><label>원격 상태</label><div class="cloud-status" id="cloudStatus">${cloudEsc(c.lastStatus||'연결 전')}${c.lastRemoteAt?`<br>마지막 원격 시각: ${cloudEsc(c.lastRemoteAt)}`:''}</div></div>
+    </div>
+    <div class="cloud-actions">
+      <button data-cloud-action="save-config" class="primary">연결 정보 저장</button>
+      <button data-cloud-action="gen-key">동기화 키 생성</button>
+      <button data-cloud-action="upload">원격 저장</button>
+      <button data-cloud-action="download">원격 불러오기</button>
+      <button data-cloud-action="copy-sql">SQL 복사</button>
+      <button data-cloud-action="clear-config" class="danger">연결 정보 삭제</button>
+    </div>
+    <div class="cloud-status"><b>먼저 할 일</b><br>1) Supabase SQL Editor에 아래 SQL 실행 → 2) Project URL / anon key / 동기화 키 입력 → 3) 연결 정보 저장 → 4) 원격 저장</div>
+    <pre class="cloud-sql" id="cloudSql">${cloudEsc(CLOUD_SQL)}</pre>
+    <div class="cloud-status cloud-danger">주의: 로그인 없는 방식은 개인용에 적합하다. 데이터 내용은 암호화되지만, 동기화 키를 아는 사람은 같은 데이터를 불러오고 덮어쓸 수 있다. 키는 길게 만들어야 한다.</div>
+  </div></section>`;
+}
+
+const v13BaseRenderSettings=renderSettings;
+renderSettings=function(){
+  return v13BaseRenderSettings()+cloudPanel();
+};
+
+function cloudReadInputs(){
+  const c=cloudCfg();
+  c.url=($('#sbUrl')?.value||'').trim().replace(/\/+$/,'');
+  c.anonKey=($('#sbAnonKey')?.value||'').trim();
+  c.syncKey=($('#sbSyncKey')?.value||'').trim();
+  c.auto=($('#sbAuto')?.value==='true');
+  return c;
+}
+function cloudSetStatus(msg,remoteAt=''){
+  const c=cloudCfg();
+  c.lastStatus=msg;
+  if(remoteAt)c.lastRemoteAt=remoteAt;
+  localStorage.setItem(APP_KEY,JSON.stringify(state));
+  const el=$('#cloudStatus'); if(el)el.innerHTML=cloudEsc(msg)+(c.lastRemoteAt?`<br>마지막 원격 시각: ${cloudEsc(c.lastRemoteAt)}`:'');
+  const chip=$('#saveChip'); if(chip)chip.textContent=msg;
+}
+function cloudNeedConfig(){
+  const c=cloudCfg();
+  if(!c.url||!c.anonKey||!c.syncKey){
+    showToast('Supabase URL, anon key, 동기화 키를 먼저 저장해야 해.');
+    return null;
+  }
+  return c;
+}
+const encV13=new TextEncoder(), decV13=new TextDecoder();
+function bytesToB64(bytes){let bin='';bytes.forEach(b=>bin+=String.fromCharCode(b));return btoa(bin)}
+function b64ToBytes(s){return Uint8Array.from(atob(s),c=>c.charCodeAt(0))}
+async function sha256hex(text){
+  const buf=await crypto.subtle.digest('SHA-256',encV13.encode(text));
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+async function deriveAes(secret,salt){
+  const base=await crypto.subtle.importKey('raw',encV13.encode(secret),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:150000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function cloudIds(secret){
+  return {
+    sync_id:await sha256hex('ipe-learning-os:id:'+secret),
+    write_hash:await sha256hex('ipe-learning-os:write:'+secret)
+  };
+}
+async function encryptSnapshot(obj,secret){
+  const salt=crypto.getRandomValues(new Uint8Array(16));
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const key=await deriveAes(secret,salt);
+  const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,encV13.encode(JSON.stringify(obj)));
+  return {encrypted_state:bytesToB64(new Uint8Array(cipher)),salt:bytesToB64(salt),iv:bytesToB64(iv)};
+}
+async function decryptSnapshot(row,secret){
+  const salt=b64ToBytes(row.salt),iv=b64ToBytes(row.iv);
+  const key=await deriveAes(secret,salt);
+  const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv},key,b64ToBytes(row.encrypted_state));
+  return JSON.parse(decV13.decode(plain));
+}
+function snapshotPayload(){
+  return {
+    version:13,
+    exportedAt:new Date().toISOString(),
+    app:state,
+    bridge:bridge(),
+    atlas:parseStorage(ATLAS_STORAGE)
+  };
+}
+function applySnapshotPayload(data){
+  if(!data||typeof data!=='object')throw new Error('invalid snapshot');
+  if(data.app)state=mergeState(defaultState(),data.app);
+  else state=mergeState(defaultState(),data);
+  if(data.bridge)localStorage.setItem(BRIDGE_KEY,JSON.stringify(data.bridge));
+  if(data.atlas)localStorage.setItem(ATLAS_STORAGE,JSON.stringify(data.atlas));
+  cloudSuppressAuto=true;
+  save('원격 데이터 적용');
+  cloudSuppressAuto=false;
+  render();
+}
+async function cloudRpc(fn,body){
+  const c=cloudNeedConfig(); if(!c)throw new Error('missing config');
+  const res=await fetch(`${c.url}/rest/v1/rpc/${fn}`,{
+    method:'POST',
+    headers:{
+      'apikey':c.anonKey,
+      'Authorization':`Bearer ${c.anonKey}`,
+      'Content-Type':'application/json'
+    },
+    body:JSON.stringify(body)
+  });
+  const text=await res.text();
+  let json=null; try{json=text?JSON.parse(text):null}catch{json=text}
+  if(!res.ok)throw new Error(typeof json==='string'?json:(json?.message||`HTTP ${res.status}`));
+  return json;
+}
+async function cloudUploadNow(){
+  const c=cloudNeedConfig(); if(!c)return;
+  cloudSetStatus('원격 저장 중...');
+  const ids=await cloudIds(c.syncKey);
+  const encrypted=await encryptSnapshot(snapshotPayload(),c.syncKey);
+  const result=await cloudRpc('save_learning_os_snapshot',{
+    p_sync_id:ids.sync_id,
+    p_write_hash:ids.write_hash,
+    p_encrypted_state:encrypted.encrypted_state,
+    p_salt:encrypted.salt,
+    p_iv:encrypted.iv
+  });
+  const at=Array.isArray(result)&&result[0]?.updated_at?result[0].updated_at:new Date().toISOString();
+  cloudSetStatus('원격 저장 완료',at);
+  showToast('Supabase에 암호화 백업을 저장했어.');
+}
+async function cloudDownloadNow(){
+  const c=cloudNeedConfig(); if(!c)return;
+  cloudSetStatus('원격 불러오는 중...');
+  const ids=await cloudIds(c.syncKey);
+  const result=await cloudRpc('load_learning_os_snapshot',{p_sync_id:ids.sync_id});
+  const row=Array.isArray(result)?result[0]:null;
+  if(!row){cloudSetStatus('원격 데이터 없음');showToast('이 동기화 키로 저장된 원격 데이터가 없어.');return;}
+  const payload=await decryptSnapshot(row,c.syncKey);
+  applySnapshotPayload(payload);
+  cloudSetStatus('원격 불러오기 완료',row.updated_at||new Date().toISOString());
+  showToast('Supabase 원격 데이터를 이 브라우저에 적용했어.');
+}
+let cloudTimer=null, cloudSuppressAuto=false;
+const v13BaseSave=save;
+save=function(message='자동 저장'){
+  v13BaseSave(message);
+  if(!cloudSuppressAuto&&cloudCfg().auto&&cloudCfg().url&&cloudCfg().anonKey&&cloudCfg().syncKey){
+    clearTimeout(cloudTimer);
+    cloudTimer=setTimeout(()=>cloudUploadNow().catch(err=>cloudSetStatus('자동 원격 저장 실패: '+err.message)),2600);
+  }
+};
+
+exportData=function(){
+  const payload=snapshotPayload();
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`정처기_LearningOS_통합백업_v13_${state.activeDate}.json`;a.click();URL.revokeObjectURL(a.href);showToast('Atlas까지 포함한 통합 백업을 내보냈어.');
+};
+importData=function(file){
+  const reader=new FileReader();
+  reader.onload=()=>{
+    try{
+      const data=JSON.parse(reader.result);
+      applySnapshotPayload(data);
+      showToast('통합 백업을 불러왔어.');
+    }catch(err){showToast('백업 형식을 읽지 못했어: '+err.message)}
+  };
+  reader.readAsText(file);
+};
+
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-cloud-action]'); if(!b)return;
+  e.preventDefault();
+  const a=b.dataset.cloudAction;
+  try{
+    if(a==='save-config'){
+      cloudReadInputs();
+      cloudSuppressAuto=true;
+      save('Supabase 연결 정보 저장');
+      cloudSuppressAuto=false;
+      render();
+      showToast('Supabase 연결 정보를 이 브라우저에 저장했어.');
+    }else if(a==='gen-key'){
+      const bytes=crypto.getRandomValues(new Uint8Array(18));
+      const key='los-'+bytesToB64(bytes).replaceAll('+','-').replaceAll('/','_').replaceAll('=','');
+      const input=$('#sbSyncKey'); if(input)input.value=key;
+      showToast('동기화 키를 생성했어. 연결 정보 저장을 눌러줘.');
+    }else if(a==='copy-sql'){
+      await navigator.clipboard.writeText(CLOUD_SQL);
+      showToast('Supabase SQL을 복사했어.');
+    }else if(a==='upload'){
+      cloudReadInputs(); await cloudUploadNow();
+    }else if(a==='download'){
+      cloudReadInputs();
+      openConfirm('원격 데이터를 불러올까?','현재 브라우저의 데이터가 원격 데이터로 덮어써져. 불안하면 먼저 통합 백업을 내보내.', '원격 불러오기', async()=>{closeModal();try{await cloudDownloadNow()}catch(err){cloudSetStatus('원격 불러오기 실패: '+err.message);showToast('원격 불러오기 실패: '+err.message)}})
+    }else if(a==='clear-config'){
+      state.settings.supabaseSync=cloudDefaults();
+      cloudSuppressAuto=true; save('Supabase 연결 정보 삭제'); cloudSuppressAuto=false;
+      render(); showToast('Supabase 연결 정보를 삭제했어.');
+    }
+  }catch(err){
+    cloudSetStatus('Supabase 오류: '+err.message);
+    showToast('Supabase 오류: '+err.message);
+  }
+},true);
+
+cloudCfg();
+
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-action],[data-tab]');if(!b)return;
   if(b.dataset.tab){state.previousTab=state.activeTab;state.activeTab=b.dataset.tab;save();render();return}
