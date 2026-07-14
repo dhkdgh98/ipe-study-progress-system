@@ -95,20 +95,40 @@ function migrate(){
   migrated.activeTab='dashboard';return migrated;
 }
 let state=migrate();
-function save(message='자동 저장'){
-  localStorage.setItem(APP_KEY,JSON.stringify(state));
-  const chip=$('#saveChip');if(chip)chip.textContent=message+' · 이 브라우저';
-  ensureBridge();
+const ITEM_BY_ID=new Map(ITEMS.map(i=>[String(i.id),i]));
+const BRIDGE_CATALOG=ITEMS.map(i=>({id:i.id,subjectNo:i.subjectNo,subject:i.subject,section:i.section,name:i.name,rank:i.rank,typeCode:i.typeCode}));
+const BRIDGE_CATALOG_SIG=BRIDGE_CATALOG.map(i=>`${i.id}|${i.subjectNo}|${i.subject}|${i.section}|${i.name}|${i.rank}|${i.typeCode}`).join('¶');
+let bridgeCache=null;
+let lastAppSerialized=localStorage.getItem(APP_KEY);
+
+function persistAppLocal(message='자동 저장'){
+ const serialized=JSON.stringify(state);
+ if(serialized!==lastAppSerialized){
+  localStorage.setItem(APP_KEY,serialized);
+  lastAppSerialized=serialized;
+ }
+ const chip=$('#saveChip');if(chip)chip.textContent=message+' · 이 브라우저';
 }
-function ensureBridge(){
-  const raw=parseStorage(BRIDGE_KEY)||{};
-  raw.catalog=ITEMS.map(i=>({id:i.id,subjectNo:i.subjectNo,subject:i.subject,section:i.section,name:i.name,rank:i.rank,typeCode:i.typeCode}));
-  raw.links=Array.isArray(raw.links)?raw.links:[];
-  localStorage.setItem(BRIDGE_KEY,JSON.stringify(raw));
-  return raw;
+function save(message='자동 저장'){persistAppLocal(message)}
+function saveUI(message='화면 상태 저장'){persistAppLocal(message)}
+
+function bridgeCatalogSig(catalog){
+ if(!Array.isArray(catalog))return '';
+ return catalog.map(i=>`${i?.id??''}|${i?.subjectNo??''}|${i?.subject??''}|${i?.section??''}|${i?.name??''}|${i?.rank??''}|${i?.typeCode??''}`).join('¶');
 }
+function ensureBridge(forceReload=false){
+ if(bridgeCache&&!forceReload)return bridgeCache;
+ const raw=parseStorage(BRIDGE_KEY)||{};
+ let dirty=false;
+ if(!Array.isArray(raw.links)){raw.links=[];dirty=true}
+ if(bridgeCatalogSig(raw.catalog)!==BRIDGE_CATALOG_SIG){raw.catalog=BRIDGE_CATALOG;dirty=true}
+ bridgeCache=raw;
+ if(dirty)localStorage.setItem(BRIDGE_KEY,JSON.stringify(raw));
+ return raw;
+}
+function invalidateBridgeCache(){bridgeCache=null}
 function bridge(){return ensureBridge()}
-function itemById(id){return ITEMS.find(i=>String(i.id)===String(id))}
+function itemById(id){return ITEM_BY_ID.get(String(id))}
 function pOf(id){return state.progress[id]||null}
 function ensureP(id){return state.progress[id]??={d0:null,reviews:{}}}
 function completedBy(item,date=state.activeDate){const p=pOf(item.id);return !!(p?.d0&&p.d0<=date)}
@@ -183,16 +203,44 @@ function renderToday(){
 }
 function renderBacklog(){
   const lane=(track,cls)=>{const all=ITEMS.filter(i=>i.track===track),done=all.filter(i=>pOf(i.id)?.d0),next=all.filter(i=>!pOf(i.id)?.d0).slice(0,18);return `<section class="panel"><div class="panel-head"><div><div class="panel-title ${cls}">${track} 새 진도 레일</div><div class="panel-note">${done.length}/${all.length}개 · ${done.reduce((s,i)=>s+i.unit,0).toFixed(2)}/${all.reduce((s,i)=>s+i.unit,0).toFixed(2)}A</div></div><span class="chip">${pct(done.length,all.length)}%</span></div><div class="panel-body"><div class="list">${next.length?next.map(i=>itemCard(i)).join(''):'<div class="empty">이 레일의 신규 항목을 전부 D0 처리했어.</div>'}</div></div></section>`};return `<div class="grid two">${lane('1·2·5','accent')}${lane('3·4','violet')}</div>`}
+function filteredItems(){
+ const f=state.itemFilters,q=(f.q||'').toLowerCase();
+ return ITEMS.filter(i=>(f.track==='all'||i.track===f.track)&&(f.rank==='all'||i.rank===f.rank)&&(f.subject==='all'||i.subject===f.subject)&&(f.section==='all'||i.section===f.section)&&(`${i.id} ${i.name} ${i.subject} ${i.section} ${i.typeCode} ${i.typeName}`.toLowerCase().includes(q)));
+}
+function renderItemResultsOnly(){
+ if(state.activeTab!=='items')return;
+ const filtered=filteredItems(),count=$('#itemResultCount'),list=$('#itemResultList');
+ if(count)count.textContent=`${filtered.length}개`;
+ if(list)list.innerHTML=filtered.map(i=>itemCard(i)).join('')||'<div class="empty">조건에 맞는 항목이 없어.</div>';
+}
 function renderItems(){
-  const f=state.itemFilters,subjects=[...new Set(ITEMS.map(i=>i.subject))],sections=[...new Set(ITEMS.filter(i=>f.subject==='all'||i.subject===f.subject).map(i=>i.section))];
-  const filtered=ITEMS.filter(i=>(f.track==='all'||i.track===f.track)&&(f.rank==='all'||i.rank===f.rank)&&(f.subject==='all'||i.subject===f.subject)&&(f.section==='all'||i.section===f.section)&&(`${i.id} ${i.name} ${i.subject} ${i.section} ${i.typeCode} ${i.typeName}`.toLowerCase().includes((f.q||'').toLowerCase())));
-  return `<section class="panel"><div class="panel-head"><div><div class="panel-title">전체 157개 항목</div><div class="panel-note">각 항목의 학습하기를 누르면 Atlas가 해당 과목·챕터·항목으로 자동 필터된다.</div></div><span class="chip">${filtered.length}개</span></div><div class="panel-body"><div class="toolbar"><input id="itemSearch" placeholder="번호, 항목명, 과목, 챕터, 유형 검색" value="${esc(f.q)}"><select id="filterTrack"><option value="all">전체 레일</option><option value="1·2·5" ${f.track==='1·2·5'?'selected':''}>1·2·5</option><option value="3·4" ${f.track==='3·4'?'selected':''}>3·4</option></select><select id="filterRank"><option value="all">전체 랭크</option>${['A','B','C','D'].map(x=>`<option value="${x}" ${f.rank===x?'selected':''}>${x}랭크</option>`).join('')}</select><select id="filterSubject"><option value="all">전체 과목</option>${subjects.map(x=>`<option value="${esc(x)}" ${f.subject===x?'selected':''}>${esc(x)}</option>`).join('')}</select><select id="filterSection"><option value="all">전체 챕터</option>${sections.map(x=>`<option value="${esc(x)}" ${f.section===x?'selected':''}>${esc(x)}</option>`).join('')}</select><button class="small" data-action="clear-item-filters">초기화</button></div><div class="list" style="margin-top:12px">${filtered.map(i=>itemCard(i)).join('')||'<div class="empty">조건에 맞는 항목이 없어.</div>'}</div></div></section>`;
+ const f=state.itemFilters,subjects=[...new Set(ITEMS.map(i=>i.subject))],sections=[...new Set(ITEMS.filter(i=>f.subject==='all'||i.subject===f.subject).map(i=>i.section))],filtered=filteredItems();
+ return `<section class="panel"><div class="panel-head"><div><div class="panel-title">전체 157개 항목</div><div class="panel-note">각 항목의 학습하기를 누르면 Atlas가 해당 과목·챕터·항목으로 자동 필터된다.</div></div><span class="chip" id="itemResultCount">${filtered.length}개</span></div><div class="panel-body"><div class="toolbar"><input id="itemSearch" placeholder="번호, 항목명, 과목, 챕터, 유형 검색" value="${esc(f.q)}"><select id="filterTrack"><option value="all">전체 레일</option><option value="1·2·5" ${f.track==='1·2·5'?'selected':''}>1·2·5</option><option value="3·4" ${f.track==='3·4'?'selected':''}>3·4</option></select><select id="filterRank"><option value="all">전체 랭크</option>${['A','B','C','D'].map(x=>`<option value="${x}" ${f.rank===x?'selected':''}>${x}랭크</option>`).join('')}</select><select id="filterSubject"><option value="all">전체 과목</option>${subjects.map(x=>`<option value="${esc(x)}" ${f.subject===x?'selected':''}>${esc(x)}</option>`).join('')}</select><select id="filterSection"><option value="all">전체 챕터</option>${sections.map(x=>`<option value="${esc(x)}" ${f.section===x?'selected':''}>${esc(x)}</option>`).join('')}</select><button class="small" data-action="clear-item-filters">초기화</button></div><div class="list" id="itemResultList" style="margin-top:12px">${filtered.map(i=>itemCard(i)).join('')||'<div class="empty">조건에 맞는 항목이 없어.</div>'}</div></div></section>`;
 }
+
+function studyAtlasContext(item){return {mode:'study',scope:'item',subject:item.subject,section:item.section,itemId:item.id,groupBy:'none',relationRoot:'',relationMode:'all',tocOpen:true,editorOpen:false}}
+function studyCrumbHtml(item){return `<b>정보처리기사</b> / ${esc(item.subject)} / ${esc(item.section)} / <b>${esc(item.id)} ${esc(item.name)}</b>`}
+function studyActionHtml(item){const p=pOf(item.id);return p?.d0?`<button class="danger" data-action="cancel-d0" data-id="${item.id}">D0 취소</button>`:`<button class="primary" data-action="complete-d0" data-id="${item.id}">D0 완료</button><button data-action="pick-date" data-id="${item.id}">날짜 지정</button>`}
+function studyMetaHtml(item){return `<div class="item-sub">${rankChip(item.rank)} ${item.unit}A · ${esc(item.typeCode)} ${esc(item.typeName)}</div><div class="item-sub" style="margin-top:10px">권장 산출물: <b style="color:#dcecff">${esc(item.recommendedAction||'—')}</b></div><div class="item-sub" style="margin-top:10px">Atlas는 개념 구조·비교·절차·관계의 근거를 만들고, D0는 해당 랭크 기준 무노트 테스트·실습을 통과했을 때만 기록.</div><button class="small" style="margin-top:10px" data-action="open-note" data-id="${item.id}">오류/보완 메모</button>`}
 function renderStudy(){
-  const item=itemById(state.studyItemId)||ITEMS[0],same=ITEMS.filter(i=>i.subject===item.subject&&i.section===item.section),p=pOf(item.id);
-  setTimeout(()=>mountAtlas('studyAtlas', {mode:'study',scope:'item',subject:item.subject,section:item.section,itemId:item.id,groupBy:'none',relationRoot:'',relationMode:'all',tocOpen:true,editorOpen:false}),0);
-  return `<div class="study-head"><div><button class="small" data-action="back-study">← 이전 화면</button><div class="crumb" style="margin-top:8px"><b>정보처리기사</b> / ${esc(item.subject)} / ${esc(item.section)} / <b>${esc(item.id)} ${esc(item.name)}</b></div><div class="panel-note">학습하기는 현재 항목을 기본값으로 잡을 뿐, Atlas 안에서 과목·챕터·항목·관계 필터와 연결 정보는 언제든 수정 가능하다.</div></div><div class="item-actions">${p?.d0?`<button class="danger" data-action="cancel-d0" data-id="${item.id}">D0 취소</button>`:`<button class="primary" data-action="complete-d0" data-id="${item.id}">D0 완료</button><button data-action="pick-date" data-id="${item.id}">날짜 지정</button>`}</div></div><div class="study-layout"><aside class="study-side"><section class="panel"><div class="panel-head"><div class="panel-title">현재 챕터</div><span class="chip">${same.length}개</span></div><div class="panel-body"><div class="study-side-list">${same.map(x=>`<button class="${x.id===item.id?'primary':''}" data-action="study-select-item" data-id="${x.id}">${esc(x.id)} · ${esc(x.name)}</button>`).join('')}</div></div></section><section class="panel" style="margin-top:12px"><div class="panel-head"><div class="panel-title">D0 완료 기준</div></div><div class="panel-body"><div class="item-sub">${rankChip(item.rank)} ${item.unit}A · ${esc(item.typeCode)} ${esc(item.typeName)}</div><div class="item-sub" style="margin-top:10px">권장 산출물: <b style="color:#dcecff">${esc(item.recommendedAction||'—')}</b></div><div class="item-sub" style="margin-top:10px">Atlas는 개념 구조·비교·절차·관계의 근거를 만들고, D0는 해당 랭크 기준 무노트 테스트·실습을 통과했을 때만 기록.</div><button class="small" style="margin-top:10px" data-action="open-note" data-id="${item.id}">오류/보완 메모</button></div></section></aside><section class="atlas-shell"><iframe id="studyAtlas" title="현재 학습 항목 Concept Atlas"></iframe></section></div>`;
+ const item=itemById(state.studyItemId)||ITEMS[0],same=ITEMS.filter(i=>i.subject===item.subject&&i.section===item.section);
+ setTimeout(()=>mountAtlas('studyAtlas',studyAtlasContext(item)),0);
+ return `<div class="study-head"><div><button class="small" data-action="back-study">← 이전 화면</button><div class="crumb" id="studyCrumb" style="margin-top:8px">${studyCrumbHtml(item)}</div><div class="panel-note">학습하기는 현재 항목을 기본값으로 잡을 뿐, Atlas 안에서 과목·챕터·항목·관계 필터와 연결 정보는 언제든 수정 가능하다.</div></div><div class="item-actions" id="studyD0Actions">${studyActionHtml(item)}</div></div><div class="study-layout"><aside class="study-side"><section class="panel"><div class="panel-head"><div class="panel-title">현재 챕터</div><span class="chip">${same.length}개</span></div><div class="panel-body"><div class="study-side-list">${same.map(x=>`<button class="${x.id===item.id?'primary':''}" data-action="study-select-item" data-id="${x.id}">${esc(x.id)} · ${esc(x.name)}</button>`).join('')}</div></div></section><section class="panel" style="margin-top:12px"><div class="panel-head"><div class="panel-title">D0 완료 기준</div></div><div class="panel-body" id="studyMetaPanel">${studyMetaHtml(item)}</div></section></aside><section class="atlas-shell"><iframe id="studyAtlas" title="현재 학습 항목 Concept Atlas"></iframe></section></div>`;
 }
+function updateStudySelection(id){
+ const next=itemById(id);if(!next)return;
+ const prev=itemById(state.studyItemId);
+ state.studyItemId=next.id;saveUI('학습 항목 전환');
+ if(!prev||prev.subject!==next.subject||prev.section!==next.section||!document.getElementById('studyAtlas')){render();return}
+ const crumb=$('#studyCrumb'),actions=$('#studyD0Actions'),meta=$('#studyMetaPanel');
+ if(crumb)crumb.innerHTML=studyCrumbHtml(next);
+ if(actions)actions.innerHTML=studyActionHtml(next);
+ if(meta)meta.innerHTML=studyMetaHtml(next);
+ document.querySelectorAll('.study-side-list [data-action="study-select-item"]').forEach(btn=>btn.classList.toggle('primary',String(btn.dataset.id)===String(next.id)));
+ const frame=document.getElementById('studyAtlas');
+ try{frame?.contentWindow?.postMessage({type:'ipe-atlas-context',context:studyAtlasContext(next)},'*')}catch{}
+}
+
 function renderAtlas(){
   setTimeout(()=>mountAtlas('globalAtlas',{mode:'atlas',scope:'all',subject:'all',section:'all',itemId:'all',groupBy:'none',relationRoot:'',relationMode:'all',tocOpen:true,editorOpen:false}),0);
   return `<section class="panel"><div class="panel-head"><div><div class="panel-title">Concept Atlas</div><div class="panel-note">전역 지식베이스. 검색뿐 아니라 관계 프레임, 과목, 챕터, 학습 항목, 개념 위계로 필터·그루핑할 수 있다.</div></div><span class="chip stage">전역 탐색</span></div><div class="panel-body" style="padding:0"><div class="atlas-shell" style="border:0;border-radius:0;height:min(900px,calc(100vh - 206px))"><iframe id="globalAtlas" title="전역 Concept Atlas"></iframe></div></div></section>`;
@@ -202,8 +250,7 @@ function renderSettings(){
   return `<section class="panel"><div class="panel-head"><div><div class="panel-title">운영 설정</div><div class="panel-note">목표량을 바꾸면 이후 진도 달성률과 완료 예측은 새 기준으로 계산된다. 이미 찍힌 D0와 복습 기한은 바뀌지 않는다.</div></div></div><div class="panel-body"><div class="settings"><div class="setting"><label>평일 1·2·5 신규 목표</label><input id="w125" type="number" min="0" step=".25" value="${s.w125}"><div class="help">기본 3A</div></div><div class="setting"><label>평일 3·4 신규 목표</label><input id="w34" type="number" min="0" step=".25" value="${s.w34}"><div class="help">기본 3A → 평일 총 6A</div></div><div class="setting"><label>주말 1·2·5 신규 목표</label><input id="e125" type="number" min="0" step=".25" value="${s.e125}"><div class="help">기본 6A</div></div><div class="setting"><label>주말 3·4 신규 목표</label><input id="e34" type="number" min="0" step=".25" value="${s.e34}"><div class="help">기본 6A → 주말 총 12A</div></div><div class="setting"><label>운영 시작일</label><input id="startDate" type="date" value="${s.startDate}"><div class="help">첫 주·첫 4주 목표에서 이 날짜 이전 목표를 자동 제외한다.</div></div><div class="setting"><label>시험일</label><input id="examDate" type="date" value="${s.examDate}"><div class="help">참고용. 학습 완료 예측은 실제 D0와 목표량으로 별도 계산.</div></div></div><div class="notice" style="margin-top:14px">현재 설정 기준 <b>주간 목표 ${weekFull.toFixed(0)}A</b> · <b>4주 목표 ${four.toFixed(0)}A</b>. 첫 블록만 운영 시작일 이전 날짜를 제외한다.</div><div class="item-actions" style="margin-top:14px;justify-content:flex-start"><button class="primary" data-action="save-settings">설정 저장</button><button class="danger" data-action="reset-progress">진도·복습 기록 초기화</button></div></div></section>`;
 }
 function render(){
-  ensureBridge();
-  $('#activeDate').value=state.activeDate;
+$('#activeDate').value=state.activeDate;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.activeTab));
   let html='';
   if(state.activeTab==='dashboard')html=renderDashboard();
@@ -215,11 +262,18 @@ function render(){
   else html=renderSettings();
   $('#main').innerHTML=html;
 }
+let atlasHtmlCache=null;
+function getAtlasHtml(){
+ if(atlasHtmlCache!==null)return atlasHtmlCache;
+ const binary=atob(ATLAS_B64),bytes=new Uint8Array(binary.length);
+ for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
+ atlasHtmlCache=new TextDecoder().decode(bytes);
+ return atlasHtmlCache;
+}
 function mountAtlas(id,context){
-  const frame=document.getElementById(id);if(!frame)return;
-  const bytes=Uint8Array.from(atob(ATLAS_B64),c=>c.charCodeAt(0));
-  frame.srcdoc=new TextDecoder().decode(bytes);
-  frame.addEventListener('load',()=>{try{frame.contentWindow.postMessage({type:'ipe-atlas-context',context},'*')}catch{}},{once:true});
+ const frame=document.getElementById(id);if(!frame)return;
+ frame.addEventListener('load',()=>{try{frame.contentWindow.postMessage({type:'ipe-atlas-context',context},'*')}catch{}},{once:true});
+ frame.srcdoc=getAtlasHtml();
 }
 let modalAction=null,undoAction=null,toastTimer=null;
 function openModal(html){$('#modalRoot').innerHTML=`<div class="modal-backdrop">${html}</div>`}
@@ -593,7 +647,7 @@ document.addEventListener('click',async e=>{
 
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-action],[data-tab]');if(!b)return;
-  if(b.dataset.tab){state.previousTab=state.activeTab;state.activeTab=b.dataset.tab;save();render();return}
+  if(b.dataset.tab){state.previousTab=state.activeTab;state.activeTab=b.dataset.tab;saveUI();render();return}
   const a=b.dataset.action,id=b.dataset.id;
   if(a==='complete-d0')setD0(id,state.activeDate);
   else if(a==='cancel-d0')cancelD0(id);
@@ -605,44 +659,40 @@ document.addEventListener('click',e=>{
   else if(a==='close-modal')closeModal();
   else if(a==='confirm-modal'){const fn=modalAction;modalAction=null;fn?.()}
   else if(a==='toast-undo'){const fn=undoAction;$('#toastRoot').innerHTML='';undoAction=null;fn?.()}
-  else if(a==='open-study'){state.previousTab=state.activeTab;state.studyItemId=id;state.activeTab='study';save();render()}
-  else if(a==='study-select-item'){state.studyItemId=id;save();render()}
-  else if(a==='back-study'){state.activeTab=state.previousTab||'today';save();render()}
-  else if(a==='open-atlas'){state.activeTab='atlas';save();render()}
-  else if(a==='clear-item-filters'){state.itemFilters={q:'',track:'all',rank:'all',subject:'all',section:'all'};save();render()}
+  else if(a==='open-study'){state.previousTab=state.activeTab;state.studyItemId=id;state.activeTab='study';saveUI();render()}
+  else if(a==='study-select-item'){updateStudySelection(id)}
+  else if(a==='back-study'){state.activeTab=state.previousTab||'today';saveUI();render()}
+  else if(a==='open-atlas'){state.activeTab='atlas';saveUI();render()}
+  else if(a==='clear-item-filters'){state.itemFilters={q:'',track:'all',rank:'all',subject:'all',section:'all'};saveUI();render()}
   else if(a==='save-settings'){['w125','w34','e125','e34'].forEach(k=>state.settings[k]=Number($('#'+k).value)||0);state.settings.startDate=$('#startDate').value||state.settings.startDate;state.settings.examDate=$('#examDate').value||state.settings.examDate;save('운영 설정 저장');render();showToast('목표량과 시작일을 저장했어.')}
   else if(a==='reset-progress')openConfirm('진도·복습 기록을 초기화할까?','D0와 복습 통과 기록, 오류 메모가 삭제돼. Atlas 개념과 학습 연결 정보는 유지된다.','초기화',()=>{state.progress={};state.notes={};save('진도 초기화');closeModal();render();showToast('진도와 복습 기록을 초기화했어.')});
   else if(a==='export')exportData();
 });
 document.addEventListener('change',e=>{
-  if(e.target.id==='activeDate'){state.activeDate=e.target.value;save();render()}
+  if(e.target.id==='activeDate'){state.activeDate=e.target.value;saveUI();render()}
   if(e.target.id==='importFile'&&e.target.files[0]){importData(e.target.files[0]);e.target.value=''}
   const f=state.itemFilters;
-  if(e.target.id==='filterTrack'){f.track=e.target.value;save();render()}
-  if(e.target.id==='filterRank'){f.rank=e.target.value;save();render()}
-  if(e.target.id==='filterSubject'){f.subject=e.target.value;f.section='all';save();render()}
-  if(e.target.id==='filterSection'){f.section=e.target.value;save();render()}
+  if(e.target.id==='filterTrack'){f.track=e.target.value;saveUI();render()}
+  if(e.target.id==='filterRank'){f.rank=e.target.value;saveUI();render()}
+  if(e.target.id==='filterSubject'){f.subject=e.target.value;f.section='all';saveUI();render()}
+  if(e.target.id==='filterSection'){f.section=e.target.value;saveUI();render()}
 });
 let itemSearchTimer=null;
 document.addEventListener('input',e=>{
-  if(e.target.id==='itemSearch'){
-    const value=e.target.value, caret=e.target.selectionStart;
-    state.itemFilters.q=value;
-    clearTimeout(itemSearchTimer);
-    itemSearchTimer=setTimeout(()=>{
-      save();
-      render();
-      const input=$('#itemSearch');
-      if(input){input.focus();input.setSelectionRange(Math.min(caret,input.value.length),Math.min(caret,input.value.length))}
-    },220);
-  }
+ if(e.target.id==='itemSearch'){
+  state.itemFilters.q=e.target.value;
+  clearTimeout(itemSearchTimer);
+  itemSearchTimer=setTimeout(()=>{
+   saveUI('검색 필터 저장');
+   renderItemResultsOnly();
+  },180);
+ }
 });
-
 
 /* v17: full data-flow stabilization */
 function v17ParseJSONSafe(raw,fallback=null){try{return raw?JSON.parse(raw):fallback}catch{return fallback}}
 function v17StorageGet(key){return v17ParseJSONSafe(localStorage.getItem(key),null)}
-function v17StorageSet(key,value){localStorage.setItem(key,JSON.stringify(value));return value}
+function v17StorageSet(key,value){localStorage.setItem(key,JSON.stringify(value));if(key===BRIDGE_KEY)bridgeCache=value;return value}
 function v17ActiveAtlasFrames(){return ['studyAtlas','globalAtlas'].map(id=>document.getElementById(id)).filter(f=>f&&f.contentWindow)}
 function v17FrameRequest(frame,timeout=550){
   return new Promise(resolve=>{
@@ -774,8 +824,10 @@ window.addEventListener('message',e=>{
   }
 });
 
-window.addEventListener('message',e=>{if(e.data?.type==='ipe-atlas-bridge-updated'){if(state.activeTab==='dashboard')render();}});
+let bridgeRefreshRaf=0;window.addEventListener('message',e=>{if(e.data?.type==='ipe-atlas-bridge-updated'){invalidateBridgeCache();if(state.activeTab==='dashboard'&&!bridgeRefreshRaf)bridgeRefreshRaf=requestAnimationFrame(()=>{bridgeRefreshRaf=0;if(state.activeTab==='dashboard')render()})}});
 ensureBridge();render();
 </script>
+
+<!-- IPE PERFORMANCE PATCH v1: bridge cache, partial item search, study iframe reuse, atlas decode cache -->
 </body>
 </html>
