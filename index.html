@@ -477,11 +477,17 @@ function getAtlasHtml(){
  const binary=atob(ATLAS_B64),bytes=new Uint8Array(binary.length);
  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
  atlasHtmlCache=new TextDecoder().decode(bytes)
+   .replace('function compactInitScrollSync(){','function compactInitScrollSync(){try{')
+   .replace('anchors.forEach(el=>compactObserver.observe(el));\n}','anchors.forEach(el=>{try{if(el&&el.nodeType===1)compactObserver.observe(el)}catch{}});\n}catch{compactObserver=null}\n}')
+   .replace('<button class="primary" data-action="new-concept">+ 새 개념</button>','<button class="primary" data-action="new-concept" onclick="if(bridgeContext.itemId&&bridgeContext.itemId!==\'all\'){event.preventDefault();event.stopImmediatePropagation();const concept=createConcept();bridgeAddLink(concept.id,bridgeContext.itemId,\'핵심\');ui.filter=\'definition\';ui.selected={kind:\'concept\',id:concept.id};ui.expandedConcepts.add(concept.id);compactSetPanel(\'editor\',true);render();toast(\'현재 학습 항목에 핵심 개념을 추가했어.\');return false}">+ 새 개념</button>')
    .replace('const C=id=>state.concepts.find(x=>x.id===id);const F=id=>state.frames.find(x=>x.id===id);const type=f=>TYPES[f.type];const framesFor=id=>state.frames.filter(f=>f.anchorId===id);const children=id=>state.concepts.filter(c=>c.primaryParent===id);',"const C=id=>window.__atlasLookup?.concept(id)||state.concepts.find(x=>x.id===id);const F=id=>window.__atlasLookup?.frame(id)||state.frames.find(x=>x.id===id);const type=f=>TYPES[f.type];const framesFor=id=>window.__atlasLookup?.frames(id)||state.frames.filter(f=>f.anchorId===id);const children=id=>window.__atlasLookup?.children(id)||state.concepts.filter(c=>c.primaryParent===id);")
    .replace('conceptCard=function(c){relatedNormalizeAll();v10NormalizeConceptLabels();const open=', 'conceptCard=function(c){const open=')
    .replace('state.concepts.unshift(c);save();return c','state.concepts.push(c);save();return c')
    .replace("if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);render();toast('새 키워드를 만들었어.');return}","if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);toast('새 키워드를 만들었어.');return}")
+   .replace("if(a==='new-context-concept'){document.querySelector('[data-action=\"new-concept\"]')?.click();return}","if(a==='new-context-concept'){const c=createConcept();if(bridgeContext.itemId&&bridgeContext.itemId!=='all')bridgeAddLink(c.id,bridgeContext.itemId,'핵심');ui.filter='definition';ui.selected={kind:'concept',id:c.id};ui.expandedConcepts.add(c.id);compactSetPanel?.('editor',true);render();toast('현재 학습 항목에 핵심 개념을 추가했어.');return}")
+   .replace("const c=createConcept();\n    ui.filter='definition';","const c=createConcept();\n    if(bridgeContext.itemId&&bridgeContext.itemId!=='all')bridgeAddLink(c.id,bridgeContext.itemId,'핵심');\n    ui.filter='definition';")
    .replace('done:ids=>{n.keywords=ids;state.keywords=[...new Set([...state.keywords,...ids])];save();renderInspector();renderFeed()}','done:ids=>window.v20ApplyKeywords(b.dataset.id,b.dataset.sec,b.dataset.line,ids)')
+   .replace('\nrender();\n})();\n\n\n/* v17:','\ntry{render()}catch(error){console.warn(\'Atlas 초기 렌더 복구\',error)}\n\n/* v17:')
    .replace('\n})();\n\n\n/* v17:','\n\n/* v17:')
    .replace('\n</scr'+'ipt>',`\nconst createAtlasMapRuntime=${createAtlasMapRuntime.toString()};\n(${atlasRuntimePatch.toString()})();\n})();\n<\/script>`);
  return atlasHtmlCache;

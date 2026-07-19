@@ -22,9 +22,15 @@
       for(const edge of graph.edges)if(edge.type==='hierarchy'){if(!parents.has(edge.to))parents.set(edge.to,[]);parents.get(edge.to).push(edge.from)}
       function getDepth(id,seen=new Set()){if(depth.has(id))return depth.get(id);if(seen.has(id))return 0;seen.add(id);const value=parents.has(id)?1+Math.min(...parents.get(id).map(parent=>getDepth(parent,new Set(seen)))):0;depth.set(id,value);return value}
       const levels=new Map();for(const node of conceptNodes){const d=getDepth(node.id);if(!levels.has(d))levels.set(d,[]);levels.get(d).push(node)}
-      for(const [level,items] of levels){items.sort((a,b)=>b.childCount-a.childCount||a.title.localeCompare(b.title));const columns=Math.max(1,Math.ceil(Math.sqrt(items.length*2)));items.forEach((node,index)=>{node.x=(index%columns)*150;node.y=level*145+Math.floor(index/columns)*95})}
+      let yCursor=80;
+      for(const level of [...levels.keys()].sort((a,b)=>a-b)){
+        const items=levels.get(level);items.sort((a,b)=>b.childCount-a.childCount||a.title.localeCompare(b.title));
+        const columns=Math.max(1,Math.ceil(Math.sqrt(items.length*2))),rows=Math.ceil(items.length/columns);
+        items.forEach((node,index)=>{node.x=80+(index%columns)*170;node.y=yCursor+Math.floor(index/columns)*130});
+        yCursor+=Math.max(1,rows)*130+90;
+      }
       const maxConceptX=Math.max(0,...conceptNodes.map(n=>n.x)),kwColumns=Math.max(1,Math.ceil(Math.sqrt(keywordNodes.length)));
-      keywordNodes.forEach((node,index)=>{node.x=maxConceptX+230+(index%kwColumns)*125;node.y=(index/kwColumns|0)*70});
+      keywordNodes.forEach((node,index)=>{node.x=maxConceptX+230+(index%kwColumns)*135;node.y=80+(index/kwColumns|0)*75});
       const minX=Math.min(0,...graph.nodes.map(n=>n.x)),minY=Math.min(0,...graph.nodes.map(n=>n.y));for(const node of graph.nodes){node.x-=minX-80;node.y-=minY-80}
     }
     function html(baseConcepts){
@@ -36,15 +42,33 @@
       const canvas=shell.querySelector('canvas'),ctx=canvas.getContext('2d',{alpha:false}),byId=new Map(graph.nodes.map(n=>[n.id,n]));
       let dpr=Math.min(devicePixelRatio||1,2),view={x:0,y:0,scale:1},drag=null,raf=0,destroyed=false;
       const worldBounds={w:Math.max(500,...graph.nodes.map(n=>n.x+n.radius+80)),h:Math.max(400,...graph.nodes.map(n=>n.y+n.radius+80))};
+      const cellSize=320,nodeCells=new Map(),edgesByNode=new Map();
+      for(const node of graph.nodes){
+        const key=`${Math.floor(node.x/cellSize)},${Math.floor(node.y/cellSize)}`;
+        if(!nodeCells.has(key))nodeCells.set(key,[]);nodeCells.get(key).push(node);
+      }
+      for(const edge of graph.edges){
+        if(!edgesByNode.has(edge.from))edgesByNode.set(edge.from,[]);edgesByNode.get(edge.from).push(edge);
+        if(!edgesByNode.has(edge.to))edgesByNode.set(edge.to,[]);edgesByNode.get(edge.to).push(edge);
+      }
       function resize(){const rect=canvas.getBoundingClientRect();canvas.width=Math.max(1,rect.width*dpr);canvas.height=Math.max(1,rect.height*dpr);draw()}
       function fit(){const rect=canvas.getBoundingClientRect();view.scale=Math.max(.08,Math.min(1.2,Math.min(rect.width/worldBounds.w,rect.height/worldBounds.h)*.92));view.x=(rect.width-worldBounds.w*view.scale)/2;view.y=(rect.height-worldBounds.h*view.scale)/2;draw()}
       function visible(node,rect){const x=node.x*view.scale+view.x,y=node.y*view.scale+view.y,r=node.radius*view.scale+20;return x+r>=0&&y+r>=0&&x-r<=rect.width&&y-r<=rect.height}
+      function viewportNodes(rect){
+        const left=(-view.x)/view.scale-90,top=(-view.y)/view.scale-90,right=(rect.width-view.x)/view.scale+90,bottom=(rect.height-view.y)/view.scale+90,result=[];
+        for(let cy=Math.floor(top/cellSize);cy<=Math.floor(bottom/cellSize);cy++)for(let cx=Math.floor(left/cellSize);cx<=Math.floor(right/cellSize);cx++){
+          const bucket=nodeCells.get(`${cx},${cy}`);if(bucket)result.push(...bucket);
+        }
+        return result;
+      }
       function schedule(){if(raf)return;raf=requestAnimationFrame(()=>{raf=0;draw()})}
       function draw(){
         if(destroyed)return;const rect=canvas.getBoundingClientRect();ctx.setTransform(dpr,0,0,dpr,0,0);ctx.fillStyle='#07101c';ctx.fillRect(0,0,rect.width,rect.height);ctx.save();ctx.translate(view.x,view.y);ctx.scale(view.scale,view.scale);ctx.lineCap='round';
-        for(const edge of graph.edges){const a=byId.get(edge.from),b=byId.get(edge.to);if(!a||!b||(!visible(a,rect)&&!visible(b,rect)))continue;ctx.beginPath();ctx.moveTo(a.x,a.y);if(edge.type==='related')ctx.quadraticCurveTo((a.x+b.x)/2+18,(a.y+b.y)/2-18,b.x,b.y);else ctx.lineTo(b.x,b.y);ctx.strokeStyle=COLORS[edge.type];ctx.globalAlpha=edge.type==='keyword'?.2:.58;ctx.lineWidth=(edge.type==='hierarchy'?2.2:1.6)/view.scale;ctx.setLineDash(edge.type==='related'?[8/view.scale,7/view.scale]:edge.type==='keyword'?[2/view.scale,7/view.scale]:[]);ctx.stroke()}
+        const visibleNodes=viewportNodes(rect),visibleIds=new Set(visibleNodes.map(node=>node.id)),edgeSet=new Set();
+        for(const node of visibleNodes)for(const edge of edgesByNode.get(node.id)||[])edgeSet.add(edge);
+        for(const edge of edgeSet){const a=byId.get(edge.from),b=byId.get(edge.to);if(!a||!b||(!visibleIds.has(a.id)&&!visibleIds.has(b.id)))continue;ctx.beginPath();ctx.moveTo(a.x,a.y);if(edge.type==='related')ctx.quadraticCurveTo((a.x+b.x)/2+18,(a.y+b.y)/2-18,b.x,b.y);else ctx.lineTo(b.x,b.y);ctx.strokeStyle=COLORS[edge.type];ctx.globalAlpha=edge.type==='keyword'?.2:.58;ctx.lineWidth=(edge.type==='hierarchy'?2.2:1.6)/view.scale;ctx.setLineDash(edge.type==='related'?[8/view.scale,7/view.scale]:edge.type==='keyword'?[2/view.scale,7/view.scale]:[]);ctx.stroke()}
         ctx.setLineDash([]);ctx.globalAlpha=1;
-        for(const node of graph.nodes){if(!visible(node,rect))continue;ctx.beginPath();ctx.arc(node.x,node.y,node.radius,0,Math.PI*2);ctx.fillStyle=node.kind==='keyword'?'#102d2b':'#10223b';ctx.fill();ctx.strokeStyle=node.kind==='keyword'?COLORS.keyword:COLORS[node.role]||COLORS.general;ctx.lineWidth=(node.base?4:2)/view.scale;ctx.stroke();if(view.scale>.32){ctx.fillStyle='#eef7ff';ctx.font=`${Math.max(10,12/view.scale)}px system-ui`;ctx.textAlign='center';ctx.textBaseline='middle';const max=node.kind==='keyword'?13:16,label=node.title.length>max?node.title.slice(0,max-1)+'…':node.title;ctx.fillText((node.kind==='keyword'?'#':'')+label,node.x,node.y-(node.kind==='concept'&&view.scale>.55?5:0));if(node.kind==='concept'&&view.scale>.55){ctx.fillStyle='#a9bbd2';ctx.font=`${Math.max(8,9/view.scale)}px system-ui`;ctx.fillText(`하위 ${node.childCount}`,node.x,node.y+13)}}}
+        for(const node of visibleNodes){if(!visible(node,rect))continue;ctx.beginPath();ctx.arc(node.x,node.y,node.radius,0,Math.PI*2);ctx.fillStyle=node.kind==='keyword'?'#102d2b':'#10223b';ctx.fill();ctx.strokeStyle=node.kind==='keyword'?COLORS.keyword:COLORS[node.role]||COLORS.general;ctx.lineWidth=(node.base?4:2)/view.scale;ctx.stroke();if(view.scale>.32){ctx.fillStyle='#eef7ff';ctx.font=`${Math.max(10,12/view.scale)}px system-ui`;ctx.textAlign='center';ctx.textBaseline='middle';const max=node.kind==='keyword'?13:16,label=node.title.length>max?node.title.slice(0,max-1)+'…':node.title;ctx.fillText((node.kind==='keyword'?'#':'')+label,node.x,node.y-(node.kind==='concept'&&view.scale>.55?5:0));if(node.kind==='concept'&&view.scale>.55){ctx.fillStyle='#a9bbd2';ctx.font=`${Math.max(8,9/view.scale)}px system-ui`;ctx.fillText(`하위 ${node.childCount}`,node.x,node.y+13)}}}
         ctx.restore();
       }
       function point(event){const rect=canvas.getBoundingClientRect();return {x:event.clientX-rect.left,y:event.clientY-rect.top}}
@@ -55,7 +79,7 @@
       shell.querySelector('[data-map-fit]').onclick=fit;shell.querySelector('[data-map-fullscreen]').onclick=async()=>{if(document.fullscreenElement)await document.exitFullscreen();else await shell.requestFullscreen();setTimeout(fit,80)};
       const observer=new ResizeObserver(resize);observer.observe(canvas);resize();fit();active={destroy(){destroyed=true;observer.disconnect();if(raf)cancelAnimationFrame(raf)}};
     }
-    return {html,buildGraph};
+    return {html,buildGraph,layout};
   }
   global.createAtlasMapRuntime=createAtlasMapRuntime;
 })(typeof window!=='undefined'?window:globalThis);
