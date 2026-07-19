@@ -125,7 +125,14 @@
       const records=filter==='definition'?state.concepts.map(value=>({kind:'concept',value})):
         filter==='all'?[...state.concepts.map(value=>({kind:'concept',value})),...state.frames.map(value=>({kind:'frame',value}))]:
         state.frames.filter(f=>f.type===filter).map(value=>({kind:'frame',value}));
-      const win=sliceWindow(root,records.length,filter==='definition'?250:290,6);
+      const rowHeight=filter==='definition'?250:290;
+      const selected=api.getUi().selected;
+      const selectedIndex=records.findIndex(record=>record.kind===selected.kind&&record.value.id===selected.id);
+      let win=sliceWindow(root,records.length,rowHeight,6);
+      if(selectedIndex>=0&&(selectedIndex<win.start||selectedIndex>=win.end)){
+        root.scrollTop=Math.max(0,selectedIndex*rowHeight-root.clientHeight*.25);
+        win=sliceWindow(root,records.length,rowHeight,6);
+      }
       const html=records.slice(win.start,win.end).map(record=>record.kind==='concept'?api.conceptCard(record.value):api.frameCard(record.value)).join('');
       inner.innerHTML=api.feedHeader()+`<div data-virtual-feed style="padding-top:${win.top}px;padding-bottom:${win.bottom}px">${html}</div>`;
       api.initLazyGraphs();

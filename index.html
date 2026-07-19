@@ -353,6 +353,29 @@ function atlasRuntimePatch(){
     if(tags)tags.innerHTML=primaryKeywords(c).map(k=>`<span class="kw">#${esc(k)}</span>`).join('')||'<span class="status">키워드 없음</span>';
   };
 
+  /* Creating inside a picker must not trigger the legacy full-app render. */
+  document.addEventListener('click',event=>{
+    const button=event.target.closest('[data-action="quick-create"]');
+    if(!button||ui.quickMode==='keyword')return;
+    event.preventDefault();event.stopImmediatePropagation();
+    const title=$('#quickTitle').value.trim();
+    if(!title){toast('개념명을 입력해줘.');return}
+    const callback=ui.quickCallback;
+    const concept=createConcept({title,definition:$('#quickDefinition').value.trim(),domain:$('#quickDomain').value.trim()});
+    closeQuick();callback?.(concept);toast('새 개념을 만들었어.');
+  },true);
+
+  /* A concept created from a chapter/item action is linked immediately. */
+  document.addEventListener('click',event=>{
+    const button=event.target.closest('[data-bridge-action="new-context-concept"]');
+    if(!button)return;
+    event.preventDefault();event.stopImmediatePropagation();
+    const concept=createConcept();
+    if(bridgeContext.itemId&&bridgeContext.itemId!=='all')bridgeAddLink(concept.id,bridgeContext.itemId,'핵심');
+    ui.filter='definition';ui.selected={kind:'concept',id:concept.id};ui.expandedConcepts.add(concept.id);
+    compactSetPanel?.('editor',true);render();toast('현재 챕터에 새 개념을 추가했어.');
+  },true);
+
   /* Concept text is a DOM-only draft until the explicit save button is used. */
   const conceptDrafts=new Map();
   const v20BaseConceptEditor=conceptEditor;
@@ -480,6 +503,8 @@ function getAtlasHtml(){
    .replace('conceptCard=function(c){relatedNormalizeAll();v10NormalizeConceptLabels();const open=', 'conceptCard=function(c){const open=')
    .replace('state.concepts.unshift(c);save();return c','state.concepts.push(c);save();return c')
    .replace("if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);render();toast('새 키워드를 만들었어.');return}","if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);toast('새 키워드를 만들었어.');return}")
+   .replace("const c=createConcept({title,definition:$('#quickDefinition').value.trim(),domain:$('#quickDomain').value.trim()});closeQuick();cb?.(c);render();toast('새 개념을 만들었어.');return","const c=createConcept({title,definition:$('#quickDefinition').value.trim(),domain:$('#quickDomain').value.trim()});closeQuick();cb?.(c);toast('새 개념을 만들었어.');return")
+   .replace("if(a==='new-context-concept'){document.querySelector('[data-action=\"new-concept\"]')?.click();return}","if(a==='new-context-concept'){const c=createConcept();if(bridgeContext.itemId&&bridgeContext.itemId!=='all')bridgeAddLink(c.id,bridgeContext.itemId,'핵심');ui.filter='definition';ui.selected={kind:'concept',id:c.id};ui.expandedConcepts.add(c.id);compactSetPanel?.('editor',true);render();toast('현재 챕터에 새 개념을 추가했어.');return}")
    .replace('done:ids=>{n.keywords=ids;state.keywords=[...new Set([...state.keywords,...ids])];save();renderInspector();renderFeed()}','done:ids=>window.v20ApplyKeywords(b.dataset.id,b.dataset.sec,b.dataset.line,ids)')
    .replace('\n})();\n\n\n/* v17:','\n\n/* v17:')
    .replace('\n</scr'+'ipt>',`\n(${atlasRuntimePatch.toString()})();\n})();\n<\/script>`);
