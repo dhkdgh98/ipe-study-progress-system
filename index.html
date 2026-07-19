@@ -266,6 +266,30 @@ let atlasHtmlCache=null;
 function atlasRuntimePatch(){
   /* v20: cheap local persistence first, expensive parent snapshot later. */
   let persistTimer=0,persistIdle=0,notifyTimer=0,notifyIdle=0,keywordCache=null;
+  let lookupDirty=true,conceptById=new Map(),frameById=new Map(),childrenByParent=new Map(),framesByAnchor=new Map();
+  const rebuildLookup=()=>{
+    if(!lookupDirty)return;
+    conceptById=new Map(state.concepts.map(concept=>[concept.id,concept]));
+    frameById=new Map(state.frames.map(frame=>[frame.id,frame]));
+    childrenByParent=new Map();framesByAnchor=new Map();
+    state.concepts.forEach(concept=>{
+      if(!concept.primaryParent)return;
+      if(!childrenByParent.has(concept.primaryParent))childrenByParent.set(concept.primaryParent,[]);
+      childrenByParent.get(concept.primaryParent).push(concept);
+    });
+    state.frames.forEach(frame=>{
+      if(!framesByAnchor.has(frame.anchorId))framesByAnchor.set(frame.anchorId,[]);
+      framesByAnchor.get(frame.anchorId).push(frame);
+    });
+    lookupDirty=false;
+  };
+  window.__atlasLookup={
+    concept(id){rebuildLookup();return conceptById.get(id)},
+    frame(id){rebuildLookup();return frameById.get(id)},
+    children(id){rebuildLookup();return childrenByParent.get(id)||[]},
+    frames(id){rebuildLookup();return framesByAnchor.get(id)||[]},
+    invalidate(){lookupDirty=true}
+  };
   const cancelScheduled=(timer,idle)=>{
     clearTimeout(timer);
     if(idle&&window.cancelIdleCallback)cancelIdleCallback(idle);
@@ -302,7 +326,7 @@ function atlasRuntimePatch(){
       else persistTimer=setTimeout(run,80);
     },delay);
   };
-  save=function(){keywordCache=null;schedulePersist(320)};
+  save=function(){keywordCache=null;lookupDirty=true;schedulePersist(320)};
   saveDebounced=function(){schedulePersist(1400)};
   window.addEventListener('beforeunload',persistLocalNow);
 
@@ -439,6 +463,8 @@ function getAtlasHtml(){
  const binary=atob(ATLAS_B64),bytes=new Uint8Array(binary.length);
  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
  atlasHtmlCache=new TextDecoder().decode(bytes)
+   .replace('const C=id=>state.concepts.find(x=>x.id===id);const F=id=>state.frames.find(x=>x.id===id);const type=f=>TYPES[f.type];const framesFor=id=>state.frames.filter(f=>f.anchorId===id);const children=id=>state.concepts.filter(c=>c.primaryParent===id);',"const C=id=>window.__atlasLookup?.concept(id)||state.concepts.find(x=>x.id===id);const F=id=>window.__atlasLookup?.frame(id)||state.frames.find(x=>x.id===id);const type=f=>TYPES[f.type];const framesFor=id=>window.__atlasLookup?.frames(id)||state.frames.filter(f=>f.anchorId===id);const children=id=>window.__atlasLookup?.children(id)||state.concepts.filter(c=>c.primaryParent===id);")
+   .replace('conceptCard=function(c){relatedNormalizeAll();v10NormalizeConceptLabels();const open=', 'conceptCard=function(c){const open=')
    .replace('state.concepts.unshift(c);save();return c','state.concepts.push(c);save();return c')
    .replace("if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);render();toast('새 키워드를 만들었어.');return}","if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);toast('새 키워드를 만들었어.');return}")
    .replace('done:ids=>{n.keywords=ids;state.keywords=[...new Set([...state.keywords,...ids])];save();renderInspector();renderFeed()}','done:ids=>window.v20ApplyKeywords(b.dataset.id,b.dataset.sec,b.dataset.line,ids)')
