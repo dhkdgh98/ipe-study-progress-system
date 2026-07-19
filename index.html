@@ -265,6 +265,9 @@ $('#activeDate').value=state.activeDate;
 }
 let atlasHtmlCache=null;
 function atlasRuntimePatch(){
+  /* The dedicated concept-map view is intentionally disabled. Relationship
+     data remains available in concept cards and editors. */
+  if(ui.filter==='related')ui.filter='all';
   /* v20: cheap local persistence first, expensive parent snapshot later. */
   let persistTimer=0,persistIdle=0,notifyTimer=0,notifyIdle=0,keywordCache=null;
   let lookupDirty=true,conceptById=new Map(),frameById=new Map(),childrenByParent=new Map(),framesByAnchor=new Map();
@@ -482,6 +485,7 @@ function getAtlasHtml(){
  const binary=atob(ATLAS_B64),bytes=new Uint8Array(binary.length);
  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
  atlasHtmlCache=new TextDecoder().decode(bytes)
+   .replace("const FILTERS=[['all','전체'],['definition','정의'],['classification','분류'],['comparison','비교'],['procedure','절차'],['structure','구조'],['related','개념 지도']];","const FILTERS=[['all','전체'],['definition','정의'],['classification','분류'],['comparison','비교'],['procedure','절차'],['structure','구조']];")
    .replace('function compactInitScrollSync(){','function compactInitScrollSync(){try{')
    .replace('anchors.forEach(el=>compactObserver.observe(el));\n}','anchors.forEach(el=>{try{if(el&&el.nodeType===1)compactObserver.observe(el)}catch{}});\n}catch{compactObserver=null}\n}')
    .replace('<button class="primary" data-action="new-concept">+ 새 개념</button>','<button class="primary" data-action="new-concept" onclick="if(bridgeContext.itemId&&bridgeContext.itemId!==\'all\'){event.preventDefault();event.stopImmediatePropagation();const concept=createConcept();bridgeAddLink(concept.id,bridgeContext.itemId,\'핵심\');ui.filter=\'definition\';ui.selected={kind:\'concept\',id:concept.id};ui.expandedConcepts.add(concept.id);compactSetPanel(\'editor\',true);render();toast(\'현재 학습 항목에 핵심 개념을 추가했어.\');return false}">+ 새 개념</button>')
