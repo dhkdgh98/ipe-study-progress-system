@@ -264,32 +264,100 @@ $('#activeDate').value=state.activeDate;
 }
 let atlasHtmlCache=null;
 function atlasRuntimePatch(){
-  /* v19: keep the persisted schema intact while taking expensive snapshot work
-     out of the keystroke path. */
-  const atlasImmediateSave=save;
-  let editSaveTimer=0,editIdleHandle=0;
-  const cancelEditSave=()=>{
-    clearTimeout(editSaveTimer);
-    if(editIdleHandle&&window.cancelIdleCallback)cancelIdleCallback(editIdleHandle);
-    editIdleHandle=0;
+  /* v20: cheap local persistence first, expensive parent snapshot later. */
+  let persistTimer=0,persistIdle=0,notifyTimer=0,notifyIdle=0,keywordCache=null;
+  const cancelScheduled=(timer,idle)=>{
+    clearTimeout(timer);
+    if(idle&&window.cancelIdleCallback)cancelIdleCallback(idle);
   };
-  const commitEdit=()=>{
-    cancelEditSave();
-    atlasImmediateSave();
+  const setSaveStatus=text=>{const el=$('#saveStatus');if(el)el.textContent=text};
+  const persistLocalNow=()=>{
+    cancelScheduled(persistTimer,persistIdle);persistTimer=0;persistIdle=0;
+    try{localStorage.setItem(STORAGE,JSON.stringify(state));setSaveStatus('로컬 저장됨')}catch{}
   };
-  saveDebounced=function(){
-    cancelEditSave();
-    editSaveTimer=setTimeout(()=>{
-      const run=()=>{editIdleHandle=0;atlasImmediateSave()};
-      if(window.requestIdleCallback)editIdleHandle=requestIdleCallback(run,{timeout:1800});
-      else editSaveTimer=setTimeout(run,80);
-    },1200);
+  const notifyParentNow=()=>{
+    cancelScheduled(notifyTimer,notifyIdle);notifyTimer=0;notifyIdle=0;
+    try{v17NotifyParent('idle-save')}catch{}
   };
-  document.addEventListener('change',e=>{
-    const t=e.target;
-    if(t?.matches?.('[data-bind-c],[data-note],[data-bind-f],[data-class-criterion],[data-group-field],[data-item-field],[data-item-value],[data-step-field],[data-edge-label]'))commitEdit();
+  const scheduleParentNotify=(delay=1100)=>{
+    cancelScheduled(notifyTimer,notifyIdle);
+    notifyTimer=setTimeout(()=>{
+      const run=()=>{notifyIdle=0;notifyParentNow()};
+      if(window.requestIdleCallback)notifyIdle=requestIdleCallback(run,{timeout:2500});
+      else notifyTimer=setTimeout(run,120);
+    },delay);
+  };
+  const schedulePersist=(delay=380)=>{
+    cancelScheduled(persistTimer,persistIdle);
+    setSaveStatus('변경 대기');
+    persistTimer=setTimeout(()=>{
+      const run=()=>{persistIdle=0;persistLocalNow();scheduleParentNotify()};
+      if(window.requestIdleCallback)persistIdle=requestIdleCallback(run,{timeout:1800});
+      else persistTimer=setTimeout(run,80);
+    },delay);
+  };
+  save=function(){keywordCache=null;schedulePersist(320)};
+  saveDebounced=function(){schedulePersist(1400)};
+  window.addEventListener('beforeunload',persistLocalNow);
+
+  /* Keyword Cue: calculate once and render a bounded result window. */
+  allKeywords=function(){
+    if(keywordCache)return keywordCache;
+    keywordCache=[...new Set([...state.keywords,...state.concepts.flatMap(c=>SECTIONS.flatMap(([k])=>(c.sections[k]||[]).flatMap(n=>n.keywords||[])))])].filter(Boolean);
+    return keywordCache;
+  };
+  renderPicker=function(){
+    const p=ui.picker;if(!p)return;
+    const q=($('#pickerSearch').value||'').trim().toLowerCase();
+    const matched=p.options().filter(x=>!q||[x.label,x.meta||''].join(' ').toLowerCase().includes(q));
+    const shown=matched.slice(0,160),more=matched.length-shown.length;
+    $('#pickerList').innerHTML=shown.length?shown.map(x=>`<button class="pick-row ${p.selected.has(x.id)?'selected':''}" data-pick-id="${esc(x.id)}"><span><b>${esc(x.label)}</b>${x.meta?`<small>${esc(x.meta)}</small>`:''}</span><span class="check">${p.selected.has(x.id)?'✓':''}</span></button>`).join('')+(more?`<div class="v20-picker-limit">${more}개 더 있음 · 검색어를 입력하면 좁혀져.</div>`:''):'<div class="hint" style="padding:10px">검색 결과가 없어.</div>';
+  };
+
+  /* Concept text is a DOM-only draft until the explicit save button is used. */
+  const conceptDrafts=new Map();
+  const v20BaseConceptEditor=conceptEditor;
+  conceptEditor=function(c){
+    return `<div class="v20-draft-editor" data-v20-concept="${esc(c.id)}">${v20BaseConceptEditor(c)}<div class="v20-savebar"><span id="v20EditState">입력 내용은 아직 카드에 반영되지 않음</span><button class="small" data-v20-cancel-concept="${esc(c.id)}">변경 취소</button><button class="primary" data-v20-save-concept="${esc(c.id)}">개념 저장</button></div></div>`;
+  };
+  const v20BaseRenderInspector=renderInspector;
+  renderInspector=function(){
+    v20BaseRenderInspector();
+    if(ui.selected.kind!=='concept')return;
+    const draft=conceptDrafts.get(ui.selected.id);if(!draft)return;
+    const editor=$('#insBody');
+    editor.querySelectorAll('[data-bind-c]').forEach(input=>{if(Object.hasOwn(draft.fields,input.dataset.bindC))input.value=draft.fields[input.dataset.bindC]});
+    editor.querySelectorAll('[data-note]').forEach(input=>{if(Object.hasOwn(draft.notes,input.dataset.note))input.value=draft.notes[input.dataset.note]});
+    markConceptDirty();
+  };
+  const conceptDraftTarget=t=>t?.matches?.('[data-bind-c],[data-note]');
+  const markConceptDirty=()=>{const el=$('#v20EditState');if(el){el.textContent='저장하지 않은 변경사항';el.classList.add('dirty')}};
+  document.addEventListener('input',e=>{
+    if(!conceptDraftTarget(e.target))return;
+    e.stopImmediatePropagation();
+    const t=e.target,id=t.dataset.id,draft=conceptDrafts.get(id)||{fields:{},notes:{}};
+    if(t.dataset.bindC)draft.fields[t.dataset.bindC]=t.value;
+    if(t.dataset.note)draft.notes[t.dataset.note]=t.value;
+    conceptDrafts.set(id,draft);markConceptDirty();
   },true);
-  window.addEventListener('beforeunload',()=>{if(editSaveTimer||editIdleHandle)commitEdit()});
+  document.addEventListener('change',e=>{
+    if(!conceptDraftTarget(e.target))return;
+    e.stopImmediatePropagation();markConceptDirty();
+  },true);
+  document.addEventListener('click',e=>{
+    const saveButton=e.target.closest('[data-v20-save-concept]');
+    const cancelButton=e.target.closest('[data-v20-cancel-concept]');
+    if(!saveButton&&!cancelButton)return;
+    e.preventDefault();e.stopImmediatePropagation();
+    const id=(saveButton||cancelButton).dataset[saveButton?'v20SaveConcept':'v20CancelConcept'];
+    const c=C(id);if(!c)return;
+    if(cancelButton){conceptDrafts.delete(id);renderInspector();toast('저장하지 않은 편집을 취소했어.');return}
+    const editor=$('#insBody');
+    editor.querySelectorAll(`[data-bind-c][data-id="${compactEscape(id)}"]`).forEach(input=>{c[input.dataset.bindC]=input.value});
+    editor.querySelectorAll(`[data-note][data-id="${compactEscape(id)}"]`).forEach(input=>{const line=c.sections[input.dataset.sec]?.find(x=>x.id===input.dataset.note);if(line)line.text=input.value});
+    c.updatedAt=now();conceptDrafts.delete(id);keywordCache=null;persistLocalNow();scheduleParentNotify(350);
+    renderNav();renderFeed();renderInspector();toast('개념 편집 내용을 저장했어.');
+  },true);
 
   /* New concepts belong at the bottom of the user's explicit card order. */
   createConcept=function(values={}){
@@ -297,7 +365,7 @@ function atlasRuntimePatch(){
     while(state.concepts.some(c=>c.title===title)){n++;title=base+' '+n}
     const c={id:uid('c'),title,domain:values.domain||'',definition:values.definition||'',parents:[],primaryParent:'',related:[],sections:blankSections(),conceptRole:'general',importance:0};
     state.concepts.push(c);
-    atlasImmediateSave();
+    keywordCache=null;save();
     return c;
   };
 
@@ -346,7 +414,7 @@ function atlasRuntimePatch(){
     return `<div class="v19-map-wrap"><div class="v19-map-head"><span>노드 크기 = 직접 하위 개념 수</span><span class="counts">개념 ${concepts.length} · 키워드 ${keywords.length} · 위계 ${edges.hierarchy.length} · 연관 ${edges.related.length}</span></div><div class="v19-legend"><span class="core">핵심 개념</span><span class="support">보조 개념</span><span class="general">일반 개념</span><span class="hierarchy">→ 상위→하위</span><span class="related">┄ 연관</span><span class="keyword">·· 키워드</span></div><svg viewBox="0 0 ${w} ${h}" role="img" aria-label="상하위, 연관 개념과 키워드를 함께 표시한 개념지도">${defs}${keywordEdges}${related}${hierarchy}${conceptNodes}${keywordNodes}</svg></div>`;
   };
   const style=document.createElement('style');
-  style.textContent=`.v19-map-wrap{border:1px solid rgba(120,220,255,.2);border-radius:15px;background:radial-gradient(circle at 50% 48%,rgba(40,82,126,.22),rgba(5,13,26,.95) 62%);overflow:hidden}.v19-map-head,.v19-legend{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 13px;font-size:12px;color:#aebed5}.v19-map-head{justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.07)}.v19-legend{padding-top:8px;padding-bottom:0}.v19-legend span:before{content:'●';margin-right:5px}.v19-legend .core:before{color:#ffca68}.v19-legend .support:before{color:#74dcff}.v19-legend .general:before{color:#b7a6ff}.v19-legend .hierarchy:before{color:#67d8ff}.v19-legend .related:before{color:#f39bc3}.v19-legend .keyword:before{color:#7ce5ad}.v19-map-wrap svg{display:block;width:100%;min-height:520px}.v19-edge{fill:none;opacity:.56}.v19-edge.hierarchy{stroke:#67d8ff;stroke-width:2.2}.v19-edge.related{stroke:#f39bc3;stroke-width:2;stroke-dasharray:8 7}.v19-edge.keyword{stroke:#7ce5ad;stroke-width:1;stroke-dasharray:2 6;opacity:.25}.v19-edge.focus{stroke-width:3.2;opacity:.9}.v19-node{cursor:pointer}.v19-node.concept circle{fill:color-mix(in srgb,var(--node) 22%,#10223b);stroke:var(--node);stroke-width:2.5;filter:drop-shadow(0 7px 13px rgba(0,0,0,.38))}.v19-node.concept.base circle{stroke-width:5;filter:drop-shadow(0 0 13px color-mix(in srgb,var(--node) 55%,transparent))}.v19-node text{text-anchor:middle;pointer-events:none;fill:#eef7ff;font-weight:800;font-size:12px}.v19-node .meta{fill:#a9bbd2;font-size:9px;font-weight:600}.v19-node.keyword{cursor:default}.v19-node.keyword rect{fill:#102d2b;stroke:#67dca0;stroke-width:1.4}.v19-node.keyword text{fill:#baf5d2;font-size:10px}.v19-node.concept:hover circle{fill:color-mix(in srgb,var(--node) 38%,#10223b)}@media(max-width:760px){.v19-map-wrap svg{min-height:420px}.v19-map-head{align-items:flex-start;flex-direction:column}}`;
+  style.textContent=`.v20-draft-editor{padding-bottom:72px}.v20-savebar{position:sticky;bottom:0;z-index:8;display:flex;align-items:center;gap:8px;margin:14px -14px -14px;padding:11px 14px;border-top:1px solid rgba(120,220,255,.28);background:rgba(10,24,43,.96);box-shadow:0 -10px 28px rgba(0,0,0,.28)}.v20-savebar span{margin-right:auto;color:#9fb2cc;font-size:11px}.v20-savebar span.dirty{color:#ffd17b;font-weight:800}.v20-picker-limit{position:sticky;bottom:0;padding:10px 12px;border-top:1px solid rgba(120,220,255,.2);background:#10243d;color:#9eb3cf;font-size:11px;text-align:center}.v19-map-wrap{border:1px solid rgba(120,220,255,.2);border-radius:15px;background:radial-gradient(circle at 50% 48%,rgba(40,82,126,.22),rgba(5,13,26,.95) 62%);overflow:hidden}.v19-map-head,.v19-legend{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 13px;font-size:12px;color:#aebed5}.v19-map-head{justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.07)}.v19-legend{padding-top:8px;padding-bottom:0}.v19-legend span:before{content:'●';margin-right:5px}.v19-legend .core:before{color:#ffca68}.v19-legend .support:before{color:#74dcff}.v19-legend .general:before{color:#b7a6ff}.v19-legend .hierarchy:before{color:#67d8ff}.v19-legend .related:before{color:#f39bc3}.v19-legend .keyword:before{color:#7ce5ad}.v19-map-wrap svg{display:block;width:100%;min-height:520px}.v19-edge{fill:none;opacity:.56}.v19-edge.hierarchy{stroke:#67d8ff;stroke-width:2.2}.v19-edge.related{stroke:#f39bc3;stroke-width:2;stroke-dasharray:8 7}.v19-edge.keyword{stroke:#7ce5ad;stroke-width:1;stroke-dasharray:2 6;opacity:.25}.v19-edge.focus{stroke-width:3.2;opacity:.9}.v19-node{cursor:pointer}.v19-node.concept circle{fill:color-mix(in srgb,var(--node) 22%,#10223b);stroke:var(--node);stroke-width:2.5;filter:drop-shadow(0 7px 13px rgba(0,0,0,.38))}.v19-node.concept.base circle{stroke-width:5;filter:drop-shadow(0 0 13px color-mix(in srgb,var(--node) 55%,transparent))}.v19-node text{text-anchor:middle;pointer-events:none;fill:#eef7ff;font-weight:800;font-size:12px}.v19-node .meta{fill:#a9bbd2;font-size:9px;font-weight:600}.v19-node.keyword{cursor:default}.v19-node.keyword rect{fill:#102d2b;stroke:#67dca0;stroke-width:1.4}.v19-node.keyword text{fill:#baf5d2;font-size:10px}.v19-node.concept:hover circle{fill:color-mix(in srgb,var(--node) 38%,#10223b)}@media(max-width:760px){.v20-savebar{align-items:stretch;flex-wrap:wrap}.v20-savebar span{width:100%}.v19-map-wrap svg{min-height:420px}.v19-map-head{align-items:flex-start;flex-direction:column}}`;
   document.head.appendChild(style);
 }
 function getAtlasHtml(){
