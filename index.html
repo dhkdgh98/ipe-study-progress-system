@@ -421,50 +421,38 @@ function atlasRuntimePatch(){
     if(tags)tags.innerHTML=primaryKeywords(c).map(k=>`<span class="kw">#${esc(k)}</span>`).join('')||'<span class="status">키워드 없음</span>';
   };
 
-  /* Concept text is a DOM-only draft until the explicit save button is used. */
-  const conceptDrafts=new Map();
+  /* Concept editor base used by the button-free autosave editor below. */
   const v20BaseConceptEditor=conceptEditor;
-  conceptEditor=function(c){
-    return `<div class="v20-draft-editor" data-v20-concept="${esc(c.id)}">${v20BaseConceptEditor(c)}<div class="v20-savebar"><span id="v20EditState">입력 내용은 아직 카드에 반영되지 않음</span><button class="small" data-v20-cancel-concept="${esc(c.id)}">변경 취소</button><button class="primary" data-v20-save-concept="${esc(c.id)}">개념 저장</button></div></div>`;
-  };
-  const v20BaseRenderInspector=renderInspector;
-  renderInspector=function(){
-    v20BaseRenderInspector();
-    if(ui.selected.kind!=='concept')return;
-    const draft=conceptDrafts.get(ui.selected.id);if(!draft)return;
-    const editor=$('#insBody');
-    editor.querySelectorAll('[data-bind-c]').forEach(input=>{if(Object.hasOwn(draft.fields,input.dataset.bindC))input.value=draft.fields[input.dataset.bindC]});
-    editor.querySelectorAll('[data-note]').forEach(input=>{if(Object.hasOwn(draft.notes,input.dataset.note))input.value=draft.notes[input.dataset.note]});
-    markConceptDirty();
-  };
   const conceptDraftTarget=t=>t?.matches?.('[data-bind-c],[data-note]');
-  const markConceptDirty=()=>{const el=$('#v20EditState');if(el){el.textContent='저장하지 않은 변경사항';el.classList.add('dirty')}};
-  document.addEventListener('input',e=>{
-    if(!conceptDraftTarget(e.target))return;
+
+  /* v21: button-free concept autosave without rerendering while typing. */
+  let conceptAutoSaveStatusTimer=0;
+  conceptEditor=function(c){
+    return `<div class="v20-draft-editor v21-autosave-editor" data-v20-concept="${esc(c.id)}">${v20BaseConceptEditor(c)}<div class="v20-savebar v21-autosavebar"><span id="v21AutoSaveState">입력 내용은 실시간 자동 저장됨</span></div></div>`;
+  };
+  const applyConceptAutoSave=t=>{
+    if(!conceptDraftTarget(t))return false;
+    const c=C(t.dataset.id);if(!c)return true;
+    if(t.dataset.bindC)c[t.dataset.bindC]=t.value;
+    if(t.dataset.note){
+      const line=c.sections[t.dataset.sec]?.find(x=>x.id===t.dataset.note);
+      if(line)line.text=t.value;
+    }
+    c.updatedAt=now();keywordCache=null;lookupDirty=true;
+    const status=$('#v21AutoSaveState');
+    if(status){status.textContent='자동 저장 대기 중';status.classList.add('dirty')}
+    saveDebounced();
+    clearTimeout(conceptAutoSaveStatusTimer);
+    conceptAutoSaveStatusTimer=setTimeout(()=>{
+      const current=$('#v21AutoSaveState');
+      if(current){current.textContent='자동 저장됨';current.classList.remove('dirty')}
+    },1900);
+    return true;
+  };
+  ['input','change'].forEach(eventName=>document.addEventListener(eventName,e=>{
+    if(!applyConceptAutoSave(e.target))return;
     e.stopImmediatePropagation();
-    const t=e.target,id=t.dataset.id,draft=conceptDrafts.get(id)||{fields:{},notes:{}};
-    if(t.dataset.bindC)draft.fields[t.dataset.bindC]=t.value;
-    if(t.dataset.note)draft.notes[t.dataset.note]=t.value;
-    conceptDrafts.set(id,draft);markConceptDirty();
-  },true);
-  document.addEventListener('change',e=>{
-    if(!conceptDraftTarget(e.target))return;
-    e.stopImmediatePropagation();markConceptDirty();
-  },true);
-  document.addEventListener('click',e=>{
-    const saveButton=e.target.closest('[data-v20-save-concept]');
-    const cancelButton=e.target.closest('[data-v20-cancel-concept]');
-    if(!saveButton&&!cancelButton)return;
-    e.preventDefault();e.stopImmediatePropagation();
-    const id=(saveButton||cancelButton).dataset[saveButton?'v20SaveConcept':'v20CancelConcept'];
-    const c=C(id);if(!c)return;
-    if(cancelButton){conceptDrafts.delete(id);renderInspector();toast('저장하지 않은 편집을 취소했어.');return}
-    const editor=$('#insBody');
-    editor.querySelectorAll(`[data-bind-c][data-id="${compactEscape(id)}"]`).forEach(input=>{c[input.dataset.bindC]=input.value});
-    editor.querySelectorAll(`[data-note][data-id="${compactEscape(id)}"]`).forEach(input=>{const line=c.sections[input.dataset.sec]?.find(x=>x.id===input.dataset.note);if(line)line.text=input.value});
-    c.updatedAt=now();conceptDrafts.delete(id);keywordCache=null;persistLocalNow();scheduleParentNotify(350);
-    renderNav();renderFeed();renderInspector();toast('개념 편집 내용을 저장했어.');
-  },true);
+  },true));
 
   /* New concepts belong at the bottom of the user's explicit card order. */
   createConcept=function(values={}){
