@@ -142,17 +142,49 @@
     function renderNav(){
       const root=api.query('#navList');if(!root)return;
       const state=api.getState(),ui=api.getUi(),q=(api.query('#searchInput')?.value||'').trim().toLowerCase();
-      let records=ui.filter==='definition'||ui.filter==='all'||ui.filter==='related'?state.concepts:state.frames.filter(f=>f.type===ui.filter);
-      if(q)records=records.filter(x=>`${x.title||''} ${x.domain||''} ${x.definition||''}`.toLowerCase().includes(q));
+      let records=[];
+      if(ui.filter==='all'){
+        rebuild();
+        const visited=new Set();
+        const conceptMatches=concept=>!q||`${concept.title||''} ${concept.domain||''} ${concept.definition||''}`.toLowerCase().includes(q);
+        const frameMatches=frame=>!q||`${frame.title||''} ${frame.type||''}`.toLowerCase().includes(q);
+        const subtreeMatches=new Map();
+        const hasMatch=(concept,trail=new Set())=>{
+          if(subtreeMatches.has(concept.id))return subtreeMatches.get(concept.id);
+          if(trail.has(concept.id))return false;
+          const next=new Set(trail);next.add(concept.id);
+          const result=conceptMatches(concept)||getFrames(concept.id).some(frameMatches)||getChildren(concept.id).some(child=>hasMatch(child,next));
+          subtreeMatches.set(concept.id,result);return result;
+        };
+        const walk=(concept,depth=0)=>{
+          if(visited.has(concept.id)||!hasMatch(concept))return;
+          visited.add(concept.id);records.push({kind:'concept',value:concept,depth});
+          for(const child of getChildren(concept.id))walk(child,depth+1);
+          const frames=getFrames(concept.id).filter(frameMatches);
+          if(frames.length){
+            const groupId='g_'+concept.id;
+            records.push({kind:'group',value:concept,depth,groupId,count:frames.length});
+            if(ui.expandedGroups.has(groupId))for(const frame of frames)records.push({kind:'frame',value:frame,depth:depth+1});
+          }
+        };
+        const roots=state.concepts.filter(concept=>!concept.primaryParent||!conceptById.has(concept.primaryParent));
+        for(const concept of roots)walk(concept,0);
+        for(const concept of state.concepts)walk(concept,0);
+      }else{
+        const source=ui.filter==='definition'||ui.filter==='related'?state.concepts:state.frames.filter(frame=>frame.type===ui.filter);
+        records=source.filter(item=>!q||`${item.title||''} ${item.domain||''} ${item.definition||''}`.toLowerCase().includes(q)).map(value=>({kind:value.anchorId?'frame':'concept',value,depth:0}));
+      }
       const win=sliceWindow(root,records.length,42,12);
-      const concept=ui.filter==='definition'||ui.filter==='all'||ui.filter==='related';
-      const html=records.slice(win.start,win.end).map(item=>concept?
-        `<button class="nav-main ${ui.selected.kind==='concept'&&ui.selected.id===item.id?'active':''}" data-open-concept="${api.escape(item.id)}"><span class="dot"></span><span class="nav-name">${api.escape(item.title)}</span><span class="nav-meta">${api.escape(item.domain||'')}</span></button>`:
-        `<button class="frame-row ${ui.selected.kind==='frame'&&ui.selected.id===item.id?'active':''}" data-open-frame="${api.escape(item.id)}"><span class="frame-icon">◇</span><span class="nav-name">${api.escape(item.title)}</span></button>`).join('');
+      const html=records.slice(win.start,win.end).map(record=>{
+        const item=record.value,indent=`<span class="indent" style="--depth:${record.depth||0}"></span>`;
+        if(record.kind==='concept')return `<button class="nav-main ${ui.selected.kind==='concept'&&ui.selected.id===item.id?'active':''}" data-open-concept="${api.escape(item.id)}">${indent}<span class="dot"></span><span class="nav-name">${api.escape(item.title)}</span><span class="nav-meta">${api.escape(item.domain||'')}</span></button>`;
+        if(record.kind==='group')return `<button class="group-row" style="--depth:${record.depth||0}" data-action="toggle-group" data-group="${api.escape(record.groupId)}"><span class="chevron ${ui.expandedGroups.has(record.groupId)?'open':''}">›</span><span>관계 개념</span><span class="frame-summary">${record.count}개</span></button>`;
+        return `<button class="frame-row ${ui.selected.kind==='frame'&&ui.selected.id===item.id?'active':''}" style="--depth:${record.depth||0}" data-open-frame="${api.escape(item.id)}">${indent}<span class="frame-icon">◇</span><span class="nav-name">${api.escape(item.title)}</span></button>`;
+      }).join('');
       root.innerHTML=`<div style="padding-top:${win.top}px;padding-bottom:${win.bottom}px">${html||'<div class="hint" style="padding:12px">표시할 항목이 없어.</div>'}</div>`;
       const title=ui.filter==='all'?'전체 탐색기':ui.filter==='definition'?'정의 탐색기':'관계 탐색기';
       const titleEl=api.query('#navTitle'),hintEl=api.query('#navHint'),countEl=api.query('#navCount');
-      if(titleEl)titleEl.textContent=title;if(hintEl)hintEl.textContent='대용량 데이터용 가상 목록 · 스크롤한 항목만 렌더링';if(countEl)countEl.textContent=records.length+'개';
+      if(titleEl)titleEl.textContent=title;if(hintEl)hintEl.textContent=ui.filter==='all'?'상하위 계층과 관계 프레임을 유지한 가상 목차':'대용량 데이터용 가상 목록 · 스크롤한 항목만 렌더링';if(countEl)countEl.textContent=(ui.filter==='all'?state.concepts.length:records.length)+'개';
       if(!navScrollBound){navScrollBound=true;let raf=0;root.addEventListener('scroll',()=>{if(raf)return;raf=requestAnimationFrame(()=>{raf=0;renderNav()})},{passive:true})}
     }
 
