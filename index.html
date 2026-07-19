@@ -277,7 +277,13 @@ function atlasRuntimePatch(){
   };
   const notifyParentNow=()=>{
     cancelScheduled(notifyTimer,notifyIdle);notifyTimer=0;notifyIdle=0;
-    try{v17NotifyParent('idle-save')}catch{}
+    try{
+      if(window.parent&&window.parent!==window){
+        const snapshot=JSON.parse(JSON.stringify(state));
+        const bridgeSnapshot=typeof bridgeRead==='function'?JSON.parse(JSON.stringify(bridgeRead())):null;
+        window.parent.postMessage({type:'ipe-atlas-saved',reason:'idle-save',state:snapshot,bridge:bridgeSnapshot,storage:STORAGE,at:new Date().toISOString()},'*');
+      }
+    }catch{}
   };
   const scheduleParentNotify=(delay=1100)=>{
     cancelScheduled(notifyTimer,notifyIdle);
@@ -312,6 +318,17 @@ function atlasRuntimePatch(){
     const matched=p.options().filter(x=>!q||[x.label,x.meta||''].join(' ').toLowerCase().includes(q));
     const shown=matched.slice(0,160),more=matched.length-shown.length;
     $('#pickerList').innerHTML=shown.length?shown.map(x=>`<button class="pick-row ${p.selected.has(x.id)?'selected':''}" data-pick-id="${esc(x.id)}"><span><b>${esc(x.label)}</b>${x.meta?`<small>${esc(x.meta)}</small>`:''}</span><span class="check">${p.selected.has(x.id)?'✓':''}</span></button>`).join('')+(more?`<div class="v20-picker-limit">${more}개 더 있음 · 검색어를 입력하면 좁혀져.</div>`:''):'<div class="hint" style="padding:10px">검색 결과가 없어.</div>';
+  };
+  window.v20ApplyKeywords=(conceptId,section,lineId,ids)=>{
+    const c=C(conceptId),line=c?.sections?.[section]?.find(x=>x.id===lineId);
+    if(!line)return;
+    line.keywords=ids;
+    state.keywords=[...new Set([...state.keywords,...ids])];
+    keywordCache=null;save();
+    const cue=[...document.querySelectorAll('[data-action="pick-keywords"]')].find(x=>x.dataset.id===conceptId&&x.dataset.sec===section&&x.dataset.line===lineId);
+    if(cue){cue.textContent=ids.length?ids.join(', '):'키워드 선택';cue.classList.toggle('empty',!ids.length)}
+    const card=document.querySelector(`[data-feed-key="concept:${compactEscape(conceptId)}"]`),tags=card?.querySelector('.card-tags');
+    if(tags)tags.innerHTML=primaryKeywords(c).map(k=>`<span class="kw">#${esc(k)}</span>`).join('')||'<span class="status">키워드 없음</span>';
   };
 
   /* Concept text is a DOM-only draft until the explicit save button is used. */
@@ -423,6 +440,8 @@ function getAtlasHtml(){
  for(let i=0;i<binary.length;i++)bytes[i]=binary.charCodeAt(i);
  atlasHtmlCache=new TextDecoder().decode(bytes)
    .replace('state.concepts.unshift(c);save();return c','state.concepts.push(c);save();return c')
+   .replace("if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);render();toast('새 키워드를 만들었어.');return}","if(keyword){const k=title.replace(/\\s+/g,' ');if(!state.keywords.includes(k))state.keywords.push(k);save();closeQuick();cb?.(k);toast('새 키워드를 만들었어.');return}")
+   .replace('done:ids=>{n.keywords=ids;state.keywords=[...new Set([...state.keywords,...ids])];save();renderInspector();renderFeed()}','done:ids=>window.v20ApplyKeywords(b.dataset.id,b.dataset.sec,b.dataset.line,ids)')
    .replace('\n})();\n\n\n/* v17:','\n\n/* v17:')
    .replace('\n</scr'+'ipt>',`\n(${atlasRuntimePatch.toString()})();\n})();\n<\/script>`);
  return atlasHtmlCache;
