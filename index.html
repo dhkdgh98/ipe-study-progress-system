@@ -415,8 +415,13 @@ function atlasRuntimePatch(){
   createConcept=function(values={}){
     let title=values.title?.trim()||'새 개념',n=1,base=title;
     while(state.concepts.some(c=>c.title===title)){n++;title=base+' '+n}
-    const c={id:uid('c'),title,domain:values.domain||'',definition:values.definition||'',parents:[],primaryParent:'',related:[],sections:blankSections(),conceptRole:'general',importance:0};
+    const createdAt=now();
+    const c={id:uid('c'),title,domain:values.domain||'',definition:values.definition||'',parents:[],primaryParent:'',related:[],sections:blankSections(),conceptRole:'general',importance:0,createdAt,updatedAt:createdAt};
     state.concepts.push(c);
+    /* Every creation path (top button, child/related picker, frame, study view)
+       must preserve the current learning context. Keep this invariant here,
+       rather than duplicating it in individual click handlers. */
+    if(bridgeContext?.itemId&&bridgeContext.itemId!=='all')bridgeAddLink(c.id,bridgeContext.itemId,'핵심');
     keywordCache=null;save();
     return c;
   };
