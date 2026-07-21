@@ -37,6 +37,9 @@ const missingFrameMember=structuredClone(base);
 missingFrameMember.atlas.frames[0].members.push('missing-object');
 assert.equal(validate(missingFrameMember).ok,false,'missing frame members must fail validation');
 
+const emptyAtlasWithHistory={app:{},atlas:{concepts:[],frames:[],objects:[],keywords:[]},bridge:{links:[],orphanedLinks:[{itemId:'011',conceptId:'missing'}]}};
+assert.equal(validate(emptyAtlasWithHistory).ok,false,'an empty Atlas must not be accepted when study-link history exists');
+
 context.confirm=()=>true;
 window.applySnapshotPayload=()=>{
   storage.set('concept-atlas-v3-feed',JSON.stringify({concepts:[],frames:[],objects:[],keywords:[]}));
