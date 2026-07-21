@@ -4,7 +4,7 @@
   const META_KEY='ipe-normalized-sync-v2';
   const PREPULL_KEY='ipe-normalized-prepull-v2';
   const enc=new TextEncoder();
-  let installed=false,dirty=false,commitTimer=0,inFlight=null;
+  let installed=false,dirty=false,commitTimer=0,inFlight=null,importInProgress=false;
 
   function parse(raw,fallback=null){try{return raw?JSON.parse(raw):fallback}catch{return fallback}}
   function uuid(){return crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:(r&3|8)).toString(16)})}
@@ -89,6 +89,8 @@
   function schedule(reason='data-change',delay=450){
     dirty=true;setMeta({dirty:true,lastDirtyAt:new Date().toISOString(),lastReason:reason});
     clearTimeout(commitTimer);
+    const guard=global.__ipeNormalizedImportGuard;
+    if(importInProgress||(guard&&Date.now()<guard.until))return;
     const c=cfg();
     if(c?.auto&&enabled())commitTimer=setTimeout(()=>commit(reason).catch(error=>global.cloudSetStatus?.('원격 저장 보류: '+error.message)),delay);
   }
@@ -117,6 +119,7 @@
     return rpc('ipe_list_revisions',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash,p_limit:limit});
   }
   async function importAtlasFile(file){
+    if(typeof global.cloudReadInputs==='function')global.cloudReadInputs();
     const parsedFile=parse(await file.text(),null);
     const atlas=parsedFile?.atlas||parsedFile;
     if(!atlas||!Array.isArray(atlas.concepts)||!Array.isArray(atlas.frames))throw new Error('Atlas 백업 형식이 아님');
@@ -138,22 +141,26 @@
     if(!audit.ok)throw new Error('백업 적용 차단: '+audit.errors.join(' / '));
     try{localStorage.setItem('ipe-normalized-preimport-v2',JSON.stringify({savedAt:new Date().toISOString(),payload:current}))}catch{throw new Error('적용 전 로컬 백업을 만들 수 없어 가져오기를 차단함')}
     const currentApp=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():{};
-    const appliedApp={...backupApp,settings:{...(backupApp?.settings||{}),supabaseSync:currentApp?.settings?.supabaseSync}};
+    const currentSync={...(currentApp?.settings?.supabaseSync||cfg()||{})};
+    const appliedApp={...backupApp,settings:{...(backupApp?.settings||{}),supabaseSync:currentSync}};
     global.__ipeNormalizedImportGuard={atlas,bridge,until:Date.now()+15000};
-    if(typeof global.applySnapshotPayload==='function')global.applySnapshotPayload({version:2,app:appliedApp,atlas,bridge});
-    else{
+    importInProgress=true;clearTimeout(commitTimer);
+    try{
+      if(typeof global.applySnapshotPayload==='function')global.applySnapshotPayload({version:2,app:appliedApp,atlas,bridge});
+      else{
+        localStorage.setItem('concept-atlas-v3-feed',JSON.stringify(atlas));
+        localStorage.setItem('ipe-atlas-bridge-v1',JSON.stringify(bridge));
+        if(typeof global.invalidateBridgeCache==='function')global.invalidateBridgeCache();
+        for(const id of ['studyAtlas','globalAtlas']){const frame=document.getElementById(id);try{frame?.contentWindow?.postMessage({type:'ipe-atlas-import-state',state:atlas},'*')}catch{}}
+      }
+      await new Promise(resolve=>setTimeout(resolve,400));
       localStorage.setItem('concept-atlas-v3-feed',JSON.stringify(atlas));
       localStorage.setItem('ipe-atlas-bridge-v1',JSON.stringify(bridge));
       if(typeof global.invalidateBridgeCache==='function')global.invalidateBridgeCache();
-      for(const id of ['studyAtlas','globalAtlas']){const frame=document.getElementById(id);try{frame?.contentWindow?.postMessage({type:'ipe-atlas-import-state',state:atlas},'*')}catch{}}
-    }
-    await new Promise(resolve=>setTimeout(resolve,400));
-    localStorage.setItem('concept-atlas-v3-feed',JSON.stringify(atlas));
-    localStorage.setItem('ipe-atlas-bridge-v1',JSON.stringify(bridge));
-    if(typeof global.invalidateBridgeCache==='function')global.invalidateBridgeCache();
-    const appliedAudit=validate(localPayload());
-    if(!appliedAudit.ok||appliedAudit.conceptCount!==atlas.concepts.length)throw new Error('가져온 Atlas가 iframe 반영 중 덮어써져 적용을 중단함');
-    schedule('atlas-backup-import',700);
+      const appliedAudit=validate(localPayload());
+      if(!appliedAudit.ok||appliedAudit.conceptCount!==atlas.concepts.length)throw new Error('가져온 Atlas가 iframe 반영 중 덮어써져 적용을 중단함');
+      dirty=true;setMeta({dirty:true,lastDirtyAt:new Date().toISOString(),lastReason:'atlas-backup-import',lastConflict:''});
+    }finally{importInProgress=false}
     return {audit,integrated,removedDangling:(candidate.bridge.links||[]).length-(bridge.links||[]).length};
   }
   function panel(){const m=meta();return `<section class="panel"><div class="panel-head"><div><div class="panel-title">정규화 저장소 v2</div><div class="panel-note">개념·노트·관계·학습 연결 분리 저장 · revision 충돌 차단 · append-only 복구 이력</div></div><span class="chip">revision ${Number(m.serverRevision)||0}</span></div><div class="panel-body"><div class="notice">접속 시 자동 덮어쓰기는 비활성화됨. 실제 데이터 해시가 달라질 때만 커밋하며, 다른 기기가 먼저 저장했으면 현재 로컬을 유지하고 충돌로 중단한다.</div><div class="cloud-actions" style="margin-top:12px"><button class="primary" data-v2-action="commit">현재 데이터 커밋</button><button data-v2-action="pull">원격 revision 확인·적용</button><button data-v2-action="history">revision 이력</button><button data-v2-action="copy-sql">v2 SQL 복사</button><button data-v2-action="audit">무결성 점검</button><button data-v2-action="import-atlas">Atlas 백업 가져오기</button><input id="v2AtlasBackupInput" type="file" accept="application/json,.json" hidden></div><div class="cloud-status" id="v2SyncStatus" style="margin-top:12px">${m.dirty?'로컬 변경 있음 · 원격 커밋 대기':'로컬 변경 없음'}${m.lastCommitAt?`<br>마지막 커밋: ${m.lastCommitAt}`:''}${m.lastConflict?`<br>충돌: ${m.lastConflict}`:''}</div></div></section>`}
@@ -172,7 +179,7 @@
     global.renderSettings=function(){return baseSettings()+panel()};
     const baseSave=global.save;
     global.save=function(message){const result=baseSave(message);schedule('app-data-change',700);return result};
-    window.addEventListener('message',event=>{if(event.data?.type==='ipe-atlas-saved')schedule('atlas-commit',350)},false);
+    window.addEventListener('message',event=>{if(event.data?.type!=='ipe-atlas-saved')return;const guard=global.__ipeNormalizedImportGuard;if(importInProgress||(guard&&Date.now()<guard.until))return;schedule('atlas-commit',350)},false);
     document.addEventListener('click',async event=>{
       const button=event.target.closest('[data-v2-action]');if(!button)return;
       event.preventDefault();event.stopImmediatePropagation();
