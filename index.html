@@ -1115,6 +1115,15 @@ window.addEventListener('message',e=>{
   const d=e.data||{};
   if(d.type==='ipe-atlas-saved'){
     if(!v17ActiveAtlasFrames().some(frame=>frame.contentWindow===e.source))return;
+    const guard=window.__ipeNormalizedImportGuard;
+    if(guard&&Date.now()<guard.until){
+      const incomingCount=Array.isArray(d.state?.concepts)?d.state.concepts.length:0;
+      const expectedCount=Array.isArray(guard.atlas?.concepts)?guard.atlas.concepts.length:0;
+      if(incomingCount<expectedCount){
+        try{e.source?.postMessage({type:'ipe-atlas-import-state',state:guard.atlas},'*')}catch{}
+        return;
+      }
+    }
     if(d.state)v17StorageSet(ATLAS_STORAGE,d.state);
     if(d.bridge)v17StorageSet(BRIDGE_KEY,d.bridge);
     const chip=$('#saveChip');if(chip)chip.textContent='Atlas 저장 반영 · 이 브라우저';
