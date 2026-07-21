@@ -1116,12 +1116,16 @@ window.addEventListener('message',e=>{
   if(d.type==='ipe-atlas-saved'){
     if(!v17ActiveAtlasFrames().some(frame=>frame.contentWindow===e.source))return;
     const guard=window.__ipeNormalizedImportGuard;
-    if(guard&&Date.now()<guard.until){
+    if(guard){
       const incomingCount=Array.isArray(d.state?.concepts)?d.state.concepts.length:0;
       const expectedCount=Array.isArray(guard.atlas?.concepts)?guard.atlas.concepts.length:0;
       if(incomingCount<expectedCount){
         try{e.source?.postMessage({type:'ipe-atlas-import-state',state:guard.atlas},'*')}catch{}
         return;
+      }
+      if(incomingCount>=expectedCount){
+        localStorage.removeItem('ipe-normalized-pending-import-v2');
+        delete window.__ipeNormalizedImportGuard;
       }
     }
     if(d.state)v17StorageSet(ATLAS_STORAGE,d.state);

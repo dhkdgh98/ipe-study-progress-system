@@ -37,4 +37,14 @@ const missingFrameMember=structuredClone(base);
 missingFrameMember.atlas.frames[0].members.push('missing-object');
 assert.equal(validate(missingFrameMember).ok,false,'missing frame members must fail validation');
 
+context.confirm=()=>true;
+window.applySnapshotPayload=()=>{
+  storage.set('concept-atlas-v3-feed',JSON.stringify({concepts:[],frames:[],objects:[],keywords:[]}));
+  storage.set('ipe-atlas-bridge-v1',JSON.stringify({links:[],catalog:[]}));
+};
+const importResult=await window.IpeNormalizedSync.importAtlasFile({text:async()=>JSON.stringify(base)});
+assert.equal(importResult.audit.ok,true,'valid integrated backup must import');
+assert.equal(window.IpeNormalizedSync.localPayload().atlas.concepts.length,1,'pending import must survive an immediate empty iframe overwrite');
+assert.ok(storage.has('ipe-normalized-pending-import-v2'),'import must remain durable until iframe acknowledgement');
+
 console.log('normalized sync runtime: ok');

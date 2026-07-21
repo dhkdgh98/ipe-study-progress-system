@@ -3,6 +3,7 @@
 
   const META_KEY='ipe-normalized-sync-v2';
   const PREPULL_KEY='ipe-normalized-prepull-v2';
+  const PENDING_IMPORT_KEY='ipe-normalized-pending-import-v2';
   const enc=new TextEncoder();
   let installed=false,dirty=false,commitTimer=0,inFlight=null,importInProgress=false;
 
@@ -27,6 +28,8 @@
     return {version:value?.version||4,progress:value?.progress||{},notes:value?.notes||{},settings};
   }
   function localPayload(){
+    const pending=parse(localStorage.getItem(PENDING_IMPORT_KEY),null);
+    if(pending?.atlas&&pending?.bridge&&pending?.app)return {version:2,app:appData(pending.app),atlas:pending.atlas,bridge:pending.bridge};
     const atlas=typeof global.v17StorageGet==='function'?global.v17StorageGet(global.ATLAS_STORAGE):parse(localStorage.getItem('concept-atlas-v3-feed'),null);
     const bridge=typeof global.bridge==='function'?global.bridge():parse(localStorage.getItem('ipe-atlas-bridge-v1'),{});
     const currentApp=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():{};
@@ -143,6 +146,7 @@
     const currentApp=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():{};
     const currentSync={...(currentApp?.settings?.supabaseSync||cfg()||{})};
     const appliedApp={...backupApp,settings:{...(backupApp?.settings||{}),supabaseSync:currentSync}};
+    localStorage.setItem(PENDING_IMPORT_KEY,JSON.stringify({savedAt:new Date().toISOString(),app:appliedApp,atlas,bridge}));
     global.__ipeNormalizedImportGuard={atlas,bridge,until:Date.now()+15000};
     importInProgress=true;clearTimeout(commitTimer);
     try{
@@ -179,7 +183,7 @@
     global.renderSettings=function(){return baseSettings()+panel()};
     const baseSave=global.save;
     global.save=function(message){const result=baseSave(message);schedule('app-data-change',700);return result};
-    window.addEventListener('message',event=>{if(event.data?.type!=='ipe-atlas-saved')return;const guard=global.__ipeNormalizedImportGuard;if(importInProgress||(guard&&Date.now()<guard.until))return;schedule('atlas-commit',350)},false);
+    window.addEventListener('message',event=>{if(event.data?.type!=='ipe-atlas-saved')return;const guard=global.__ipeNormalizedImportGuard;if(importInProgress||guard)return;schedule('atlas-commit',350)},false);
     document.addEventListener('click',async event=>{
       const button=event.target.closest('[data-v2-action]');if(!button)return;
       event.preventDefault();event.stopImmediatePropagation();
@@ -190,7 +194,14 @@
         if(button.dataset.v2Action==='history'){const rows=await history();if(status)status.innerHTML=(rows||[]).map(row=>`r${row.revision} · 개념 ${row.concept_count} · 연결 ${row.bridge_link_count} · ${row.device_id} · ${row.created_at}`).join('<br>')||'revision 없음'}
         if(button.dataset.v2Action==='copy-sql'){const sql=await (await fetch('supabase-normalized-v2.sql')).text();await navigator.clipboard.writeText(sql);if(status)status.textContent='v2 SQL 복사 완료'}
         if(button.dataset.v2Action==='audit'){const audit=validate(localPayload());if(status)status.textContent=audit.ok?`정상 · 개념 ${audit.conceptCount} · 연결 ${audit.linkCount}`:`오류 · ${audit.errors.join(' / ')}`}
-        if(button.dataset.v2Action==='import-atlas'){document.getElementById('v2AtlasBackupInput')?.click()}
+        if(button.dataset.v2Action==='import-atlas'){
+          if(typeof global.cloudReadInputs==='function')global.cloudReadInputs();
+          const current=cfg();if(current){current.auto=false;current.autoPull=false}
+          const app=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():null;
+          if(app)localStorage.setItem('ipe-learning-os-v4',JSON.stringify(app));
+          global.render?.();
+          setTimeout(()=>document.getElementById('v2AtlasBackupInput')?.click(),0);
+        }
       }catch(error){if(status)status.textContent='실패 · '+error.message;global.showToast?.(error.message)}
     },true);
     document.addEventListener('change',async event=>{
