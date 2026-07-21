@@ -386,12 +386,14 @@ begin
   for v_link in select value from jsonb_array_elements(coalesce(p_bridge->'links','[]'::jsonb)) loop
     insert into public.ipe_study_concept_links(sync_id,item_id,concept_id,role,revision)
       values(p_sync_id,v_link->>'itemId',v_link->>'conceptId',coalesce(v_link->>'role','참조'),v_revision)
-      on conflict do update set role=excluded.role, revision=excluded.revision;
+      on conflict (sync_id,item_id,concept_id) do update
+        set role=excluded.role, revision=excluded.revision;
   end loop;
   for v_link in select value from jsonb_array_elements(coalesce(p_bridge->'orphanedLinks','[]'::jsonb)) loop
     insert into public.ipe_orphan_study_links(sync_id,item_id,missing_concept_id,role,reason,revision)
       values(p_sync_id,v_link->>'itemId',v_link->>'conceptId',coalesce(v_link->>'role','참조'),coalesce(v_link->>'reason','missing_concept_body'),v_revision)
-      on conflict do update set role=excluded.role,reason=excluded.reason,revision=excluded.revision,archived_at=now();
+      on conflict (sync_id,item_id,missing_concept_id) do update
+        set role=excluded.role,reason=excluded.reason,revision=excluded.revision,archived_at=now();
   end loop;
 
   v_index := 0;

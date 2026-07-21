@@ -5,6 +5,10 @@ const sql=fs.readFileSync(new URL('../supabase-normalized-v2.sql',import.meta.ur
 const client=fs.readFileSync(new URL('../normalized-sync.js',import.meta.url),'utf8');
 const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
 
+assert.match(sql,/on conflict \(sync_id,item_id,concept_id\) do update/i,'active link upsert must name its conflict key');
+assert.match(sql,/on conflict \(sync_id,item_id,missing_concept_id\) do update/i,'orphan link upsert must name its conflict key');
+assert.doesNotMatch(sql,/on conflict\s+do update/i,'PostgreSQL DO UPDATE requires an explicit conflict target');
+
 assert.match(sql,/create table if not exists public\.ipe_concepts/,'concepts must be normalized');
 assert.match(sql,/create table if not exists public\.ipe_concept_lines/,'concept lines must be normalized');
 assert.match(sql,/create table if not exists public\.ipe_concept_relations/,'concept relationships must be normalized');
