@@ -1,0 +1,3 @@
+# Local forensic recovery artifacts may contain decrypted personal data and
+# device-local Supabase credentials. Never commit them.
+recovery/
