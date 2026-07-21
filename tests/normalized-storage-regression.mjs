@@ -35,7 +35,10 @@ assert.match(client,/__ipeNormalizedImportGuard/,'backup import must guard again
 assert.match(client,/if\(importInProgress\|\|\(guard&&Date\.now\(\)<guard\.until\)\)return/,'imports must suppress every automatic commit trigger');
 assert.match(client,/lastReason:'atlas-backup-import'/,'imports must remain dirty until the user commits manually');
 assert.doesNotMatch(client,/schedule\('atlas-backup-import'/,'backup imports must never auto-commit');
+assert.match(client,/PENDING_IMPORT_KEY/,'imported data must remain authoritative until the iframe acknowledges it');
+assert.match(client,/current\.auto=false;current\.autoPull=false/,'opening the import picker must persistently disable automatic remote actions');
 assert.match(html,/incomingCount<expectedCount/,'parent storage must reject stale empty iframe snapshots during import');
+assert.match(html,/removeItem\('ipe-normalized-pending-import-v2'\)/,'pending import may clear only after iframe acknowledgement');
 assert.match(client,/본문 없는 학습 연결/,'client must detect dangling bridge references');
 assert.match(client,/global\.v14TryStartupPull=function\(\)\{\}/,'destructive startup pull must be disabled');
 assert.match(html,/normalized-sync\.js/,'normalized sync runtime must be loaded');
