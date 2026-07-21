@@ -32,6 +32,9 @@ assert.match(client,/delete settings\.supabaseSync/,'Supabase credentials must n
 assert.match(client,/integrated&&parsedFile\.bridge\?parsedFile\.bridge:current\.bridge/,'integrated backups must restore Bridge instead of relying on the current browser');
 assert.match(client,/integrated&&parsedFile\.app\?parsedFile\.app:current\.app/,'integrated backups must restore App progress and notes');
 assert.match(client,/__ipeNormalizedImportGuard/,'backup import must guard against stale iframe saves');
+assert.match(client,/if\(importInProgress\|\|\(guard&&Date\.now\(\)<guard\.until\)\)return/,'imports must suppress every automatic commit trigger');
+assert.match(client,/lastReason:'atlas-backup-import'/,'imports must remain dirty until the user commits manually');
+assert.doesNotMatch(client,/schedule\('atlas-backup-import'/,'backup imports must never auto-commit');
 assert.match(html,/incomingCount<expectedCount/,'parent storage must reject stale empty iframe snapshots during import');
 assert.match(client,/본문 없는 학습 연결/,'client must detect dangling bridge references');
 assert.match(client,/global\.v14TryStartupPull=function\(\)\{\}/,'destructive startup pull must be disabled');
