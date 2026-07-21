@@ -201,6 +201,7 @@ as $$
 declare
   v_concepts jsonb := coalesce(p_atlas->'concepts', '[]'::jsonb);
   v_links jsonb := coalesce(p_bridge->'links', '[]'::jsonb);
+  v_orphan_links jsonb := coalesce(p_bridge->'orphanedLinks', '[]'::jsonb);
   v_count integer;
   v_distinct integer;
   v_dangling integer;
@@ -211,6 +212,9 @@ begin
   if jsonb_typeof(v_links) <> 'array' then
     raise exception using errcode='22023', message='bridge.links must be an array';
   end if;
+  if jsonb_typeof(v_orphan_links) <> 'array' then
+    raise exception using errcode='22023', message='bridge.orphanedLinks must be an array';
+  end if;
 
   select count(*), count(distinct c->>'id')
     into v_count, v_distinct
@@ -220,6 +224,9 @@ begin
     where coalesce(c->>'id','') = ''
   ) then
     raise exception using errcode='23505', message='duplicate or empty concept id';
+  end if;
+  if v_count = 0 and jsonb_array_length(v_links) + jsonb_array_length(v_orphan_links) > 0 then
+    raise exception using errcode='23503', message='commit rejected: empty atlas cannot retain study links';
   end if;
 
   select count(*) into v_dangling

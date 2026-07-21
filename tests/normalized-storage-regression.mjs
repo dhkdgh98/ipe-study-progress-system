@@ -37,8 +37,11 @@ assert.match(client,/lastReason:'atlas-backup-import'/,'imports must remain dirt
 assert.doesNotMatch(client,/schedule\('atlas-backup-import'/,'backup imports must never auto-commit');
 assert.match(client,/PENDING_IMPORT_KEY/,'imported data must remain authoritative until the iframe acknowledges it');
 assert.match(client,/current\.auto=false;current\.autoPull=false/,'opening the import picker must persistently disable automatic remote actions');
-assert.match(html,/incomingCount<expectedCount/,'parent storage must reject stale empty iframe snapshots during import');
+assert.match(html,/incomingIds\.every\(\(id,index\)=>id===expectedIds\[index\]\)/,'parent storage must require the exact imported concept ID set');
+assert.match(html,/v17StorageSet\(BRIDGE_KEY,guard\.bridge\)/,'Atlas and Bridge must be acknowledged as one atomic pair');
 assert.match(html,/removeItem\('ipe-normalized-pending-import-v2'\)/,'pending import may clear only after iframe acknowledgement');
+assert.match(client,/빈 Atlas와 학습 연결이 함께 든 백업은 적용할 수 없음/,'empty Atlas backups with study links must be rejected before confirmation');
+assert.match(sql,/empty atlas cannot retain study links/,'the server must reject empty Atlas commits that retain links');
 assert.match(client,/본문 없는 학습 연결/,'client must detect dangling bridge references');
 assert.match(client,/global\.v14TryStartupPull=function\(\)\{\}/,'destructive startup pull must be disabled');
 assert.match(html,/normalized-sync\.js/,'normalized sync runtime must be loaded');

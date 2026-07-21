@@ -1117,16 +1117,19 @@ window.addEventListener('message',e=>{
     if(!v17ActiveAtlasFrames().some(frame=>frame.contentWindow===e.source))return;
     const guard=window.__ipeNormalizedImportGuard;
     if(guard){
-      const incomingCount=Array.isArray(d.state?.concepts)?d.state.concepts.length:0;
-      const expectedCount=Array.isArray(guard.atlas?.concepts)?guard.atlas.concepts.length:0;
-      if(incomingCount<expectedCount){
+      const incomingIds=(Array.isArray(d.state?.concepts)?d.state.concepts:[]).map(c=>String(c?.id||'')).sort();
+      const expectedIds=(Array.isArray(guard.atlas?.concepts)?guard.atlas.concepts:[]).map(c=>String(c?.id||'')).sort();
+      const sameIds=incomingIds.length===expectedIds.length&&incomingIds.every((id,index)=>id===expectedIds[index]);
+      if(!sameIds){
         try{e.source?.postMessage({type:'ipe-atlas-import-state',state:guard.atlas},'*')}catch{}
         return;
       }
-      if(incomingCount>=expectedCount){
-        localStorage.removeItem('ipe-normalized-pending-import-v2');
-        delete window.__ipeNormalizedImportGuard;
-      }
+      v17StorageSet(ATLAS_STORAGE,guard.atlas);
+      v17StorageSet(BRIDGE_KEY,guard.bridge);
+      localStorage.removeItem('ipe-normalized-pending-import-v2');
+      delete window.__ipeNormalizedImportGuard;
+      const chip=$('#saveChip');if(chip)chip.textContent='백업 Atlas·Bridge 원자 적용 완료';
+      return;
     }
     if(d.state)v17StorageSet(ATLAS_STORAGE,d.state);
     if(d.bridge)v17StorageSet(BRIDGE_KEY,d.bridge);

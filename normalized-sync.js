@@ -40,6 +40,7 @@
     const concepts=Array.isArray(payload?.atlas?.concepts)?payload.atlas.concepts:[];
     const objects=Array.isArray(payload?.atlas?.objects)?payload.atlas.objects:[];
     const links=Array.isArray(payload?.bridge?.links)?payload.bridge.links:[];
+    const orphanedLinks=Array.isArray(payload?.bridge?.orphanedLinks)?payload.bridge.orphanedLinks:[];
     const ids=new Set();
     for(const concept of concepts){if(!concept?.id)errors.push('ID가 없는 개념이 있음');else if(ids.has(concept.id))errors.push('중복 개념 ID: '+concept.id);else ids.add(concept.id)}
     const dangling=links.filter(link=>!ids.has(link?.conceptId));
@@ -50,7 +51,8 @@
     }
     const entityIds=new Set([...ids,...objects.map(object=>object?.id).filter(Boolean)]);
     for(const frame of payload?.atlas?.frames||[])for(const member of frame.members||[])if(!entityIds.has(member))errors.push(`${frame.id}: 존재하지 않는 프레임 멤버 ${member}`);
-    if(!concepts.length)warnings.push('Atlas 개념이 0개임');
+    if(!concepts.length&&(links.length||orphanedLinks.length))errors.push(`Atlas 개념은 0개인데 보존된 학습 연결이 ${links.length+orphanedLinks.length}개 있음`);
+    else if(!concepts.length)warnings.push('Atlas 개념이 0개임');
     return {ok:!errors.length,errors:[...new Set(errors)],warnings,dangling,conceptCount:concepts.length,linkCount:links.length};
   }
   async function rpc(name,body){
@@ -131,6 +133,7 @@
     const backupApp=integrated&&parsedFile.app?parsedFile.app:current.app;
     const backupBridge=integrated&&parsedFile.bridge?parsedFile.bridge:current.bridge;
     const candidate={version:2,app:appData(backupApp),atlas,bridge:backupBridge};
+    if(!atlas.concepts.length&&((backupBridge.links||[]).length||(backupBridge.orphanedLinks||[]).length))throw new Error('빈 Atlas와 학습 연결이 함께 든 백업은 적용할 수 없음');
     let audit=validate(candidate),bridge=candidate.bridge;
     if(audit.dangling.length){
       const byItem=audit.dangling.reduce((out,link)=>{out[link.itemId]=(out[link.itemId]||0)+1;return out},{});
