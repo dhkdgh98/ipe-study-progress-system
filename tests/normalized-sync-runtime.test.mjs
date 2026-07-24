@@ -9,6 +9,7 @@ const window={
   TextEncoder,
   localStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,String(value))},
   __ipeGetAppState:()=>({version:4,progress:{},notes:{},settings:{examDate:'2026-08-07',supabaseSync:{syncKey:'must-not-leak'}}}),
+  v17StorageGet:key=>JSON.parse(storage.get(key)??'null'),
 };
 const context={window,crypto:webcrypto,TextEncoder,localStorage:window.localStorage,console,setTimeout,clearTimeout,confirm:()=>false,Blob,URL};
 vm.runInNewContext(fs.readFileSync(new URL('../normalized-sync.js',import.meta.url),'utf8'),context);
@@ -17,6 +18,7 @@ const validate=window.IpeNormalizedSync.validate;
 storage.set('concept-atlas-v3-feed',JSON.stringify({concepts:[],frames:[],objects:[],keywords:[]}));
 storage.set('ipe-atlas-bridge-v1',JSON.stringify({links:[],catalog:[]}));
 assert.equal(window.IpeNormalizedSync.localPayload().app.settings.supabaseSync,undefined,'sync credentials must remain device-local');
+assert.equal(window.IpeNormalizedSync.localPayload().atlas.concepts.length,0,'the browser storage adapter must use the explicit Atlas key');
 const base={
   app:{},
   atlas:{
@@ -49,5 +51,13 @@ const importResult=await window.IpeNormalizedSync.importAtlasFile({text:async()=
 assert.equal(importResult.audit.ok,true,'valid integrated backup must import');
 assert.equal(window.IpeNormalizedSync.localPayload().atlas.concepts.length,1,'pending import must survive an immediate empty iframe overwrite');
 assert.ok(storage.has('ipe-normalized-pending-import-v2'),'import must remain durable until iframe acknowledgement');
+
+storage.delete('ipe-normalized-pending-import-v2');
+storage.set('concept-atlas-v3-feed',JSON.stringify(base.atlas));
+storage.set('ipe-atlas-bridge-v1',JSON.stringify(base.bridge));
+const incompleteBackup={version:2,app:{progress:{'001':{d0:'2026-07-24'}},notes:{},settings:{}},atlas:{concepts:[],frames:[],objects:[],keywords:[]},bridge:base.bridge};
+const recoveredResult=await window.IpeNormalizedSync.importFile({text:async()=>JSON.stringify(incompleteBackup)});
+assert.equal(recoveredResult.audit.ok,true,'an incomplete new backup may reuse an intact current Atlas after confirmation');
+assert.equal(window.IpeNormalizedSync.localPayload().atlas.concepts.length,1,'the current Atlas body must survive an incomplete backup import');
 
 console.log('normalized sync runtime: ok');

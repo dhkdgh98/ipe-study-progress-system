@@ -1,21 +1,57 @@
 (function(global){
   'use strict';
 
+  const APP_KEY='ipe-learning-os-v4';
+  const ATLAS_KEY='concept-atlas-v3-feed';
+  const BRIDGE_KEY='ipe-atlas-bridge-v1';
   const META_KEY='ipe-normalized-sync-v2';
   const PREPULL_KEY='ipe-normalized-prepull-v2';
+  const PREIMPORT_KEY='ipe-normalized-preimport-v2';
   const PENDING_IMPORT_KEY='ipe-normalized-pending-import-v2';
+  const BACKUP_FORMAT='ipe-learning-os-backup';
   const enc=new TextEncoder();
-  let installed=false,dirty=false,commitTimer=0,inFlight=null,importInProgress=false;
+  let installed=false;
+  let commitTimer=0;
+  let retryTimer=0;
+  let inFlight=null;
+  let importInProgress=false;
 
   function parse(raw,fallback=null){try{return raw?JSON.parse(raw):fallback}catch{return fallback}}
   function uuid(){return crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:(r&3|8)).toString(16)})}
+  function now(){return new Date().toISOString()}
   function meta(){
-    const value={version:2,deviceId:uuid(),serverRevision:0,lastPayloadHash:'',lastCommitAt:'',dirty:false,...parse(localStorage.getItem(META_KEY),{})};
-    localStorage.setItem(META_KEY,JSON.stringify(value));return value;
+    const saved=parse(localStorage.getItem(META_KEY),{});
+    const value={
+      version:3,
+      deviceId:uuid(),
+      serverRevision:0,
+      lastPayloadHash:'',
+      lastCommitAt:'',
+      lastLocalAt:'',
+      lastBackupAt:'',
+      dirty:false,
+      generation:0,
+      committedGeneration:0,
+      localState:'saved',
+      serverState:'unconfigured',
+      retryCount:0,
+      lastError:'',
+      lastConflict:'',
+      restorePending:false,
+      ...saved,
+    };
+    localStorage.setItem(META_KEY,JSON.stringify(value));
+    return value;
   }
-  function setMeta(patch){const value={...meta(),...patch};localStorage.setItem(META_KEY,JSON.stringify(value));return value}
+  function setMeta(patch){
+    const value={...meta(),...patch};
+    localStorage.setItem(META_KEY,JSON.stringify(value));
+    updateStatusUI(value);
+    return value;
+  }
   function cfg(){return typeof global.cloudCfg==='function'?global.cloudCfg():null}
   function enabled(){const c=cfg();return !!(c?.url&&c?.anonKey&&c?.syncKey)}
+  function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]))}
   async function sha256(value){const digest=await crypto.subtle.digest('SHA-256',enc.encode(value));return [...new Uint8Array(digest)].map(x=>x.toString(16).padStart(2,'0')).join('')}
   async function ids(secret){return {syncId:await sha256('ipe-learning-os:id:'+secret),writeHash:await sha256('ipe-learning-os:write:'+secret)}}
   function stable(value){
@@ -24,16 +60,49 @@
     return JSON.stringify(value);
   }
   function appData(value){
-    const settings={...(value?.settings||{})};delete settings.supabaseSync;
+    const settings={...(value?.settings||{})};
+    delete settings.supabaseSync;
     return {version:value?.version||4,progress:value?.progress||{},notes:value?.notes||{},settings};
   }
-  function localPayload(){
+  function emptyAtlas(){return {concepts:[],frames:[],keywords:[],objects:[]}}
+  function emptyBridge(){return {links:[],orphanedLinks:[],catalog:[]}}
+
+  function pendingPayload(){
     const pending=parse(localStorage.getItem(PENDING_IMPORT_KEY),null);
     if(pending?.atlas&&pending?.bridge&&pending?.app)return {version:2,app:appData(pending.app),atlas:pending.atlas,bridge:pending.bridge};
-    const atlas=typeof global.v17StorageGet==='function'?global.v17StorageGet(global.ATLAS_STORAGE):parse(localStorage.getItem('concept-atlas-v3-feed'),null);
-    const bridge=typeof global.bridge==='function'?global.bridge():parse(localStorage.getItem('ipe-atlas-bridge-v1'),{});
-    const currentApp=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():{};
-    return {version:2,app:appData(currentApp),atlas:atlas||{concepts:[],frames:[],keywords:[],objects:[]},bridge:bridge||{links:[],catalog:[]}};
+    return null;
+  }
+  function localPayload(){
+    const pending=pendingPayload();
+    if(pending)return pending;
+    const atlas=typeof global.v17StorageGet==='function'
+      ?global.v17StorageGet(ATLAS_KEY)
+      :parse(localStorage.getItem(ATLAS_KEY),null);
+    const bridge=typeof global.bridge==='function'
+      ?global.bridge()
+      :parse(localStorage.getItem(BRIDGE_KEY),null);
+    const currentApp=typeof global.__ipeGetAppState==='function'
+      ?global.__ipeGetAppState()
+      :parse(localStorage.getItem(APP_KEY),{});
+    return {version:2,app:appData(currentApp),atlas:atlas||emptyAtlas(),bridge:bridge||emptyBridge()};
+  }
+  async function collectPayload({flush=true}={}){
+    const pending=pendingPayload();
+    if(pending)return pending;
+    if(flush&&typeof global.v17FlushAllStores==='function'){
+      const flushed=await global.v17FlushAllStores();
+      const payload={
+        version:2,
+        app:appData(flushed?.app||global.__ipeGetAppState?.()||{}),
+        atlas:flushed?.atlas||emptyAtlas(),
+        bridge:flushed?.bridge||emptyBridge(),
+      };
+      localStorage.setItem(ATLAS_KEY,JSON.stringify(payload.atlas));
+      localStorage.setItem(BRIDGE_KEY,JSON.stringify(payload.bridge));
+      localStorage.setItem(APP_KEY,JSON.stringify(global.__ipeGetAppState?.()||flushed?.app||{}));
+      return payload;
+    }
+    return localPayload();
   }
   function validate(payload){
     const errors=[],warnings=[];
@@ -41,179 +110,605 @@
     const objects=Array.isArray(payload?.atlas?.objects)?payload.atlas.objects:[];
     const links=Array.isArray(payload?.bridge?.links)?payload.bridge.links:[];
     const orphanedLinks=Array.isArray(payload?.bridge?.orphanedLinks)?payload.bridge.orphanedLinks:[];
-    const ids=new Set();
-    for(const concept of concepts){if(!concept?.id)errors.push('ID가 없는 개념이 있음');else if(ids.has(concept.id))errors.push('중복 개념 ID: '+concept.id);else ids.add(concept.id)}
-    const dangling=links.filter(link=>!ids.has(link?.conceptId));
+    const conceptIds=new Set();
+    for(const concept of concepts){
+      if(!concept?.id)errors.push('ID가 없는 개념이 있음');
+      else if(conceptIds.has(concept.id))errors.push('중복 개념 ID: '+concept.id);
+      else conceptIds.add(concept.id);
+    }
+    const dangling=links.filter(link=>!conceptIds.has(link?.conceptId));
     if(dangling.length)errors.push(`본문 없는 학습 연결 ${dangling.length}개`);
     for(const concept of concepts){
-      for(const parent of concept.parents||[])if(!ids.has(parent))errors.push(`${concept.id}: 존재하지 않는 상위 개념 ${parent}`);
-      for(const related of concept.related||[])if(!ids.has(related))errors.push(`${concept.id}: 존재하지 않는 연관 개념 ${related}`);
+      for(const parent of concept.parents||[])if(!conceptIds.has(parent))errors.push(`${concept.id}: 존재하지 않는 상위 개념 ${parent}`);
+      for(const related of concept.related||[])if(!conceptIds.has(related))errors.push(`${concept.id}: 존재하지 않는 연관 개념 ${related}`);
     }
-    const entityIds=new Set([...ids,...objects.map(object=>object?.id).filter(Boolean)]);
+    const entityIds=new Set([...conceptIds,...objects.map(object=>object?.id).filter(Boolean)]);
     for(const frame of payload?.atlas?.frames||[])for(const member of frame.members||[])if(!entityIds.has(member))errors.push(`${frame.id}: 존재하지 않는 프레임 멤버 ${member}`);
     if(!concepts.length&&(links.length||orphanedLinks.length))errors.push(`Atlas 개념은 0개인데 보존된 학습 연결이 ${links.length+orphanedLinks.length}개 있음`);
     else if(!concepts.length)warnings.push('Atlas 개념이 0개임');
-    return {ok:!errors.length,errors:[...new Set(errors)],warnings,dangling,conceptCount:concepts.length,linkCount:links.length};
+    return {ok:!errors.length,errors:[...new Set(errors)],warnings,dangling,conceptCount:concepts.length,linkCount:links.length,orphanCount:orphanedLinks.length};
+  }
+  function counts(payload){
+    return {
+      progress:Object.keys(payload?.app?.progress||{}).length,
+      notes:Object.keys(payload?.app?.notes||{}).length,
+      concepts:Array.isArray(payload?.atlas?.concepts)?payload.atlas.concepts.length:0,
+      frames:Array.isArray(payload?.atlas?.frames)?payload.atlas.frames.length:0,
+      objects:Array.isArray(payload?.atlas?.objects)?payload.atlas.objects.length:0,
+      activeLinks:Array.isArray(payload?.bridge?.links)?payload.bridge.links.length:0,
+      orphanedLinks:Array.isArray(payload?.bridge?.orphanedLinks)?payload.bridge.orphanedLinks.length:0,
+    };
   }
   async function rpc(name,body){
-    const c=cfg();if(!c?.url||!c?.anonKey)throw new Error('Supabase 연결 정보가 없음');
-    const response=await fetch(`${c.url.replace(/\/$/,'')}/rest/v1/rpc/${name}`,{method:'POST',headers:{apikey:c.anonKey,Authorization:`Bearer ${c.anonKey}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const text=await response.text();let data=null;try{data=text?JSON.parse(text):null}catch{data=text}
-    if(!response.ok){const message=typeof data==='string'?data:(data?.message||`HTTP ${response.status}`);const error=new Error(message);error.status=response.status;error.detail=data?.details||data?.detail||'';throw error}
+    const c=cfg();
+    if(!c?.url||!c?.anonKey)throw new Error('Supabase 연결 정보가 없음');
+    let response;
+    try{
+      response=await fetch(`${c.url.replace(/\/$/,'')}/rest/v1/rpc/${name}`,{
+        method:'POST',
+        headers:{apikey:c.anonKey,Authorization:`Bearer ${c.anonKey}`,'Content-Type':'application/json'},
+        body:JSON.stringify(body),
+      });
+    }catch(error){
+      const wrapped=new Error(navigator.onLine===false?'오프라인 상태':'네트워크 연결 실패');
+      wrapped.cause=error;
+      wrapped.transient=true;
+      throw wrapped;
+    }
+    const text=await response.text();
+    let data=null;
+    try{data=text?JSON.parse(text):null}catch{data=text}
+    if(!response.ok){
+      const message=typeof data==='string'?data:(data?.message||`HTTP ${response.status}`);
+      const error=new Error(message);
+      error.status=response.status;
+      error.detail=data?.details||data?.detail||'';
+      error.transient=response.status===429||response.status>=500;
+      throw error;
+    }
     return data;
   }
-  async function commit(reason='data-change'){
-    if(inFlight)return inFlight;
-    inFlight=(async()=>{
-      if(!enabled())throw new Error('정규화 원격 저장 연결 정보가 없음');
-      const payload=localPayload(),audit=validate(payload);
-      if(!audit.ok)throw new Error('원격 커밋 차단: '+audit.errors.join(' / '));
-      const payloadHash=await sha256(stable(payload));
-      const m=meta();
-      if(payloadHash===m.lastPayloadHash){dirty=false;setMeta({dirty:false});return {skipped:true,revision:m.serverRevision,audit}}
-      const c=cfg(),identity=await ids(c.syncKey),operationId=uuid();
-      global.cloudSetStatus?.(`revision ${m.serverRevision} → 원격 커밋 중`);
-      let result;
-      try{
-        result=await rpc('ipe_commit_state',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash,p_expected_revision:Number(m.serverRevision)||0,p_operation_id:operationId,p_device_id:m.deviceId,p_payload_hash:payloadHash,p_app:payload.app,p_atlas:payload.atlas,p_bridge:payload.bridge});
-      }catch(error){
-        if(/revision conflict|40001/i.test(error.message+' '+error.detail)){
-          setMeta({dirty:true,lastConflictAt:new Date().toISOString(),lastConflict:error.message});
-          global.cloudSetStatus?.('원격 충돌 감지 · 자동 덮어쓰기 중단');
-          throw new Error('다른 디바이스가 먼저 저장함. 로컬 데이터는 유지됐고 원격 덮어쓰기는 차단됨.');
-        }
-        throw error;
-      }
-      const row=Array.isArray(result)?result[0]:result;
-      dirty=false;setMeta({serverRevision:Number(row?.revision)||m.serverRevision,lastPayloadHash:payloadHash,lastCommitAt:row?.committed_at||new Date().toISOString(),dirty:false,lastReason:reason,lastConflict:''});
-      global.cloudSetStatus?.(`원격 revision ${row?.revision} 저장·무결성 검증 완료`,row?.committed_at||'');
-      return {row,audit,payloadHash};
-    })();
-    try{return await inFlight}finally{inFlight=null}
-  }
-  function schedule(reason='data-change',delay=450){
-    dirty=true;setMeta({dirty:true,lastDirtyAt:new Date().toISOString(),lastReason:reason});
-    clearTimeout(commitTimer);
-    const guard=global.__ipeNormalizedImportGuard;
-    if(importInProgress||(guard&&Date.now()<guard.until))return;
-    const c=cfg();
-    if(c?.auto&&enabled())commitTimer=setTimeout(()=>commit(reason).catch(error=>global.cloudSetStatus?.('원격 저장 보류: '+error.message)),delay);
-  }
   async function head(){
-    const c=cfg();if(!enabled())throw new Error('Supabase 연결 정보가 없음');
+    const c=cfg();
+    if(!enabled())throw new Error('Supabase 연결 정보가 없음');
     const identity=await ids(c.syncKey);
-    try{const rows=await rpc('ipe_load_head',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash});return Array.isArray(rows)?rows[0]||null:rows}catch(error){if(/invalid sync key/i.test(error.message))return null;throw error}
+    try{
+      const rows=await rpc('ipe_load_head',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash});
+      return Array.isArray(rows)?rows[0]||null:rows;
+    }catch(error){
+      if(/invalid sync key/i.test(error.message))return null;
+      throw error;
+    }
   }
+
+  function setLocalSaved(message='로컬 저장됨'){
+    setMeta({localState:'saved',lastLocalAt:now(),lastLocalMessage:message});
+  }
+  function markChanged(reason='data-change',delay=700){
+    const current=meta();
+    const nextGeneration=Number(current.generation||0)+1;
+    setMeta({
+      dirty:true,
+      generation:nextGeneration,
+      localState:'saved',
+      lastLocalAt:now(),
+      lastReason:reason,
+      serverState:enabled()?'queued':'unconfigured',
+      lastError:'',
+    });
+    clearTimeout(commitTimer);
+    if(importInProgress||current.restorePending)return;
+    if(enabled())commitTimer=setTimeout(()=>flushNow(reason,{manual:false}).catch(()=>{}),delay);
+  }
+  function retryLater(reason){
+    clearTimeout(retryTimer);
+    const current=meta();
+    const attempt=Math.min(6,Number(current.retryCount||0)+1);
+    const delay=Math.min(60000,1500*(2**(attempt-1)));
+    setMeta({retryCount:attempt,serverState:navigator.onLine===false?'offline':'failed'});
+    retryTimer=setTimeout(()=>flushNow(reason,{manual:false}).catch(()=>{}),delay);
+  }
+  async function commitOnce(reason,{verify=true}={}){
+    const start=meta();
+    const startGeneration=Number(start.generation)||0;
+    setMeta({localState:'saving',serverState:enabled()?'saving':'unconfigured',lastError:''});
+    let payload;
+    try{
+      payload=await collectPayload({flush:true});
+      setLocalSaved('App·Atlas·Bridge 로컬 저장됨');
+    }catch(error){
+      setMeta({localState:'failed',serverState:start.dirty?'queued':start.serverState,lastError:error.message});
+      throw new Error('로컬 통합 저장 실패: '+error.message);
+    }
+    const audit=validate(payload);
+    if(!audit.ok){
+      setMeta({dirty:true,serverState:'blocked',lastError:audit.errors.join(' / ')});
+      throw new Error('원격 커밋 차단: '+audit.errors.join(' / '));
+    }
+    const payloadHash=await sha256(stable(payload));
+    if(!enabled()){
+      setMeta({dirty:true,localState:'saved',serverState:'unconfigured',lastError:''});
+      return {localOnly:true,audit,payloadHash};
+    }
+    const latestBeforeWrite=meta();
+    if(payloadHash===latestBeforeWrite.lastPayloadHash){
+      const clean=Number(meta().generation)===startGeneration;
+      setMeta({
+        dirty:!clean,
+        committedGeneration:startGeneration,
+        serverState:clean?'saved':'queued',
+        retryCount:0,
+        restorePending:false,
+      });
+      return {skipped:true,revision:latestBeforeWrite.serverRevision,audit,payloadHash};
+    }
+    const c=cfg();
+    const identity=await ids(c.syncKey);
+    const operationId=uuid();
+    let result;
+    try{
+      result=await rpc('ipe_commit_state',{
+        p_sync_id:identity.syncId,
+        p_write_hash:identity.writeHash,
+        p_expected_revision:Number(start.serverRevision)||0,
+        p_operation_id:operationId,
+        p_device_id:start.deviceId,
+        p_payload_hash:payloadHash,
+        p_app:payload.app,
+        p_atlas:payload.atlas,
+        p_bridge:payload.bridge,
+      });
+    }catch(error){
+      if(/revision conflict|40001/i.test(error.message+' '+error.detail)){
+        setMeta({dirty:true,serverState:'conflict',lastConflictAt:now(),lastConflict:error.message,lastError:error.message});
+        throw new Error('다른 디바이스가 먼저 저장함. 로컬 데이터는 보존했고 자동 덮어쓰기를 중단함');
+      }
+      setMeta({dirty:true,serverState:navigator.onLine===false?'offline':'failed',lastError:error.message});
+      if(error.transient||navigator.onLine===false)retryLater(reason);
+      throw error;
+    }
+    const row=Array.isArray(result)?result[0]:result;
+    const savedRevision=Number(row?.revision)||Number(start.serverRevision)||0;
+    if(verify){
+      const remote=await head();
+      if(!remote||Number(remote.revision)!==savedRevision||remote.payload_hash!==payloadHash){
+        setMeta({dirty:true,serverState:'failed',lastError:'저장 후 서버 revision/hash 검증 실패'});
+        throw new Error('저장 후 서버 revision/hash 검증 실패');
+      }
+    }
+    const clean=Number(meta().generation)===startGeneration;
+    setMeta({
+      serverRevision:savedRevision,
+      lastPayloadHash:payloadHash,
+      lastCommitAt:row?.committed_at||now(),
+      dirty:!clean,
+      committedGeneration:startGeneration,
+      serverState:clean?'saved':'queued',
+      retryCount:0,
+      lastReason:reason,
+      lastConflict:'',
+      lastError:'',
+      restorePending:false,
+    });
+    return {row,audit,payloadHash,revision:savedRevision};
+  }
+  async function flushNow(reason='manual',{manual=true}={}){
+    clearTimeout(commitTimer);
+    clearTimeout(retryTimer);
+    if(inFlight)return inFlight;
+    const task=commitOnce(reason,{verify:true});
+    inFlight=task;
+    let result;
+    try{
+      result=await task;
+    }finally{
+      if(inFlight===task)inFlight=null;
+    }
+    if(meta().dirty&&!result.localOnly)return flushNow('queued-after-'+reason,{manual});
+    return result;
+  }
+
+  async function createBackup(){
+    setMeta({localState:'saving'});
+    const payload=await collectPayload({flush:true});
+    const audit=validate(payload);
+    if(!audit.ok){
+      setMeta({localState:'failed',lastError:audit.errors.join(' / ')});
+      throw new Error('백업 생성 차단: '+audit.errors.join(' / '));
+    }
+    const payloadHash=await sha256(stable(payload));
+    const createdAt=now();
+    const envelope={
+      format:BACKUP_FORMAT,
+      schemaVersion:3,
+      createdAt,
+      source:'manual-file',
+      revision:Number(meta().serverRevision)||0,
+      payloadHash,
+      counts:counts(payload),
+      data:payload,
+    };
+    const blob=new Blob([JSON.stringify(envelope,null,2)],{type:'application/json'});
+    const anchor=document.createElement('a');
+    anchor.href=URL.createObjectURL(blob);
+    anchor.download=`IPE_LearningOS_backup_r${envelope.revision}_${createdAt.slice(0,10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(anchor.href);
+    setMeta({localState:'saved',lastLocalAt:createdAt,lastBackupAt:createdAt,lastBackupHash:payloadHash});
+    global.showToast?.(`통합 백업 생성 완료 · 개념 ${envelope.counts.concepts} · 연결 ${envelope.counts.activeLinks}`);
+    return envelope;
+  }
+  function normalizeBackup(parsed,current){
+    let candidate=null;
+    if(parsed?.format===BACKUP_FORMAT&&parsed?.data)candidate=parsed.data;
+    else if(parsed?.data?.app&&parsed?.data?.atlas&&parsed?.data?.bridge)candidate=parsed.data;
+    else if(parsed?.app&&parsed?.atlas&&parsed?.bridge)candidate={version:2,app:appData(parsed.app),atlas:parsed.atlas,bridge:parsed.bridge};
+    else if(parsed?.atlas&&parsed?.bridge)candidate={version:2,app:appData(parsed.app||current.app),atlas:parsed.atlas,bridge:parsed.bridge};
+    else if(Array.isArray(parsed?.concepts)&&Array.isArray(parsed?.frames))candidate={version:2,app:current.app,atlas:parsed,bridge:current.bridge};
+    if(!candidate)throw new Error('지원하지 않는 백업 형식');
+    const backupConcepts=Array.isArray(candidate.atlas?.concepts)?candidate.atlas.concepts:[];
+    const currentConcepts=Array.isArray(current.atlas?.concepts)?current.atlas.concepts:[];
+    const backupLinks=Array.isArray(candidate.bridge?.links)?candidate.bridge.links:[];
+    if(!backupConcepts.length&&backupLinks.length&&currentConcepts.length){
+      return {
+        ...candidate,
+        atlas:current.atlas,
+        recoveryNote:`백업의 Atlas 본문이 비어 있어 현재 로컬 Atlas 개념 ${currentConcepts.length}개를 결합한다.`,
+      };
+    }
+    return candidate;
+  }
+  function archiveDangling(payload){
+    const audit=validate(payload);
+    if(!audit.dangling.length)return {payload,audit,removed:0};
+    const danglingKeys=new Set(audit.dangling.map(link=>`${link.itemId}\u0000${link.conceptId}`));
+    const archived=audit.dangling.map(link=>({...link,reason:'missing_concept_body',archivedAt:now()}));
+    const bridge={
+      ...payload.bridge,
+      orphanedLinks:[...(payload.bridge.orphanedLinks||[]),...archived],
+      links:(payload.bridge.links||[]).filter(link=>!danglingKeys.has(`${link.itemId}\u0000${link.conceptId}`)),
+    };
+    const next={...payload,bridge};
+    return {payload:next,audit:validate(next),removed:audit.dangling.length};
+  }
+  async function applyCandidate(candidate,{source='file'}={}){
+    const current=await collectPayload({flush:true});
+    let prepared={version:2,app:appData(candidate.app),atlas:candidate.atlas,bridge:candidate.bridge};
+    if(!prepared.atlas?.concepts?.length&&((prepared.bridge?.links||[]).length||(prepared.bridge?.orphanedLinks||[]).length))throw new Error('빈 Atlas와 학습 연결이 함께 든 백업은 적용할 수 없음');
+    const archived=archiveDangling(prepared);
+    prepared=archived.payload;
+    if(!archived.audit.ok)throw new Error('백업 적용 차단: '+archived.audit.errors.join(' / '));
+    const before=counts(current),after=counts(prepared);
+    const approved=confirm(
+      `백업을 로컬에 적용할까?\n\n`+
+      (candidate.recoveryNote?candidate.recoveryNote+'\n\n':'')+
+      `진도 ${before.progress} → ${after.progress}\n`+
+      `개념 ${before.concepts} → ${after.concepts}\n`+
+      `활성 연결 ${before.activeLinks} → ${after.activeLinks}\n`+
+      `고아 연결 ${before.orphanedLinks} → ${after.orphanedLinks}\n\n`+
+      `현재 데이터는 적용 전에 체크포인트로 보존되며 서버에는 자동 반영하지 않는다.`
+    );
+    if(!approved)return {cancelled:true};
+    localStorage.setItem(PREIMPORT_KEY,JSON.stringify({savedAt:now(),source,payload:current}));
+    const currentApp=global.__ipeGetAppState?.()||parse(localStorage.getItem(APP_KEY),{});
+    const currentSync={...(currentApp?.settings?.supabaseSync||cfg()||{})};
+    const appliedApp={...candidate.app,settings:{...(candidate.app?.settings||{}),supabaseSync:currentSync}};
+    localStorage.setItem(PENDING_IMPORT_KEY,JSON.stringify({savedAt:now(),source,app:appliedApp,atlas:prepared.atlas,bridge:prepared.bridge}));
+    global.__ipeNormalizedImportGuard={atlas:prepared.atlas,bridge:prepared.bridge,until:Date.now()+30000};
+    importInProgress=true;
+    clearTimeout(commitTimer);
+    try{
+      if(typeof global.applySnapshotPayload!=='function')throw new Error('가져오기 함수가 준비되지 않음');
+      global.applySnapshotPayload({version:2,app:appliedApp,atlas:prepared.atlas,bridge:prepared.bridge});
+      localStorage.setItem(ATLAS_KEY,JSON.stringify(prepared.atlas));
+      localStorage.setItem(BRIDGE_KEY,JSON.stringify(prepared.bridge));
+      localStorage.setItem(APP_KEY,JSON.stringify(appliedApp));
+      global.invalidateBridgeCache?.();
+      await new Promise(resolve=>setTimeout(resolve,450));
+      const appliedAudit=validate(pendingPayload()||localPayload());
+      if(!appliedAudit.ok||appliedAudit.conceptCount!==after.concepts)throw new Error('백업 데이터의 원자 적용 확인 실패');
+      const currentMeta=meta();
+      setMeta({
+        dirty:true,
+        generation:Number(currentMeta.generation||0)+1,
+        localState:'saved',
+        lastLocalAt:now(),
+        serverState:'restore-pending',
+        restorePending:true,
+        lastReason:'backup-restore',
+        lastError:'',
+      });
+      global.showToast?.('백업을 로컬에 적용했어. 확인 후 지금 저장을 눌러 서버에 새 revision으로 저장해.');
+      return {audit:appliedAudit,removedDangling:archived.removed,before,after};
+    }finally{
+      importInProgress=false;
+    }
+  }
+  async function importFile(file){
+    const parsed=parse(await file.text(),null);
+    if(!parsed)throw new Error('백업 JSON을 읽을 수 없음');
+    const current=await collectPayload({flush:true});
+    const candidate=normalizeBackup(parsed,current);
+    return applyCandidate(candidate,{source:'file'});
+  }
+  async function importAtlasFile(file){return importFile(file)}
+
   async function pull(){
-    const remote=await head();if(!remote)throw new Error('정규화 저장소에 원격 revision이 없음');
-    const localApp=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():{};
-    const payload={version:2,app:{...remote.app_state,settings:{...(remote.app_state?.settings||{}),supabaseSync:localApp?.settings?.supabaseSync}},atlas:remote.atlas_state,bridge:remote.bridge_state};
-    const audit=validate(payload);if(!audit.ok)throw new Error('원격 데이터 무결성 오류: '+audit.errors.join(' / '));
-    const current=localPayload(),currentHash=await sha256(stable(current));
-    if(dirty||meta().dirty)throw new Error('저장되지 않은 로컬 변경이 있어 원격 적용을 차단함');
+    const remote=await head();
+    if(!remote)throw new Error('정규화 저장소에 원격 revision이 없음');
+    const currentMeta=meta();
+    if(currentMeta.dirty)throw new Error('저장되지 않은 로컬 변경이 있어 원격 적용을 차단함');
+    const current=await collectPayload({flush:true});
+    const localApp=global.__ipeGetAppState?.()||{};
+    const candidate={
+      version:2,
+      app:{...remote.app_state,settings:{...(remote.app_state?.settings||{}),supabaseSync:localApp?.settings?.supabaseSync}},
+      atlas:remote.atlas_state,
+      bridge:remote.bridge_state,
+    };
+    const audit=validate(candidate);
+    if(!audit.ok)throw new Error('원격 데이터 무결성 오류: '+audit.errors.join(' / '));
     if(!confirm(`원격 revision ${remote.revision}을 적용할까?\n현재 로컬 데이터는 적용 전에 보존된다.`))return {cancelled:true};
-    try{localStorage.setItem(PREPULL_KEY,JSON.stringify({savedAt:new Date().toISOString(),payload:current}))}catch{throw new Error('적용 전 로컬 백업을 만들 수 없어 원격 적용을 차단함')}
-    if(typeof global.applySnapshotPayload!=='function')throw new Error('가져오기 함수가 준비되지 않음');
-    global.applySnapshotPayload(payload);
-    setMeta({serverRevision:Number(remote.revision)||0,lastPayloadHash:remote.payload_hash||await sha256(stable(payload)),lastPullAt:new Date().toISOString(),prePullHash:currentHash,dirty:false});dirty=false;
-    global.cloudSetStatus?.(`원격 revision ${remote.revision} 적용 완료`,remote.created_at||'');
+    localStorage.setItem(PREPULL_KEY,JSON.stringify({savedAt:now(),payload:current}));
+    global.applySnapshotPayload(candidate);
+    localStorage.setItem(ATLAS_KEY,JSON.stringify(candidate.atlas));
+    localStorage.setItem(BRIDGE_KEY,JSON.stringify(candidate.bridge));
+    localStorage.removeItem(PENDING_IMPORT_KEY);
+    delete global.__ipeNormalizedImportGuard;
+    setMeta({
+      serverRevision:Number(remote.revision)||0,
+      lastPayloadHash:remote.payload_hash||await sha256(stable(candidate)),
+      lastPullAt:now(),
+      dirty:false,
+      serverState:'saved',
+      localState:'saved',
+      restorePending:false,
+      lastConflict:'',
+      lastError:'',
+    });
     return {remote,audit};
   }
   async function history(limit=30){
     const c=cfg(),identity=await ids(c.syncKey);
     return rpc('ipe_list_revisions',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash,p_limit:limit});
   }
-  async function importAtlasFile(file){
-    if(typeof global.cloudReadInputs==='function')global.cloudReadInputs();
-    const parsedFile=parse(await file.text(),null);
-    const atlas=parsedFile?.atlas||parsedFile;
-    if(!atlas||!Array.isArray(atlas.concepts)||!Array.isArray(atlas.frames))throw new Error('Atlas 백업 형식이 아님');
-    const current=localPayload();
-    const integrated=!!parsedFile?.atlas;
-    const backupApp=integrated&&parsedFile.app?parsedFile.app:current.app;
-    const backupBridge=integrated&&parsedFile.bridge?parsedFile.bridge:current.bridge;
-    const candidate={version:2,app:appData(backupApp),atlas,bridge:backupBridge};
-    if(!atlas.concepts.length&&((backupBridge.links||[]).length||(backupBridge.orphanedLinks||[]).length))throw new Error('빈 Atlas와 학습 연결이 함께 든 백업은 적용할 수 없음');
-    let audit=validate(candidate),bridge=candidate.bridge;
-    if(audit.dangling.length){
-      const byItem=audit.dangling.reduce((out,link)=>{out[link.itemId]=(out[link.itemId]||0)+1;return out},{});
-      const detail=Object.entries(byItem).map(([itemId,count])=>`${itemId}: ${count}개`).join(', ');
-      if(!confirm(`백업 Atlas에는 본문이 없지만 Bridge에만 남은 연결이 ${audit.dangling.length}개 있다.\n${detail}\n\n정상 연결에서 분리해 고아 연결 보관소에 보존하고 백업을 적용할까?`))throw new Error('고아 연결 보관을 취소해 백업 적용을 중단함');
-      const danglingKeys=new Set(audit.dangling.map(link=>`${link.itemId}\u0000${link.conceptId}`));
-      const archived=audit.dangling.map(link=>({...link,reason:'missing_concept_body',archivedAt:new Date().toISOString()}));
-      bridge={...bridge,orphanedLinks:[...(bridge.orphanedLinks||[]),...archived],links:(bridge.links||[]).filter(link=>!danglingKeys.has(`${link.itemId}\u0000${link.conceptId}`))};
-      audit=validate({...candidate,bridge});
-    }
-    if(!audit.ok)throw new Error('백업 적용 차단: '+audit.errors.join(' / '));
-    try{localStorage.setItem('ipe-normalized-preimport-v2',JSON.stringify({savedAt:new Date().toISOString(),payload:current}))}catch{throw new Error('적용 전 로컬 백업을 만들 수 없어 가져오기를 차단함')}
-    const currentApp=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():{};
-    const currentSync={...(currentApp?.settings?.supabaseSync||cfg()||{})};
-    const appliedApp={...backupApp,settings:{...(backupApp?.settings||{}),supabaseSync:currentSync}};
-    localStorage.setItem(PENDING_IMPORT_KEY,JSON.stringify({savedAt:new Date().toISOString(),app:appliedApp,atlas,bridge}));
-    global.__ipeNormalizedImportGuard={atlas,bridge,until:Date.now()+15000};
-    importInProgress=true;clearTimeout(commitTimer);
-    try{
-      if(typeof global.applySnapshotPayload==='function')global.applySnapshotPayload({version:2,app:appliedApp,atlas,bridge});
-      else{
-        localStorage.setItem('concept-atlas-v3-feed',JSON.stringify(atlas));
-        localStorage.setItem('ipe-atlas-bridge-v1',JSON.stringify(bridge));
-        if(typeof global.invalidateBridgeCache==='function')global.invalidateBridgeCache();
-        for(const id of ['studyAtlas','globalAtlas']){const frame=document.getElementById(id);try{frame?.contentWindow?.postMessage({type:'ipe-atlas-import-state',state:atlas},'*')}catch{}}
-      }
-      await new Promise(resolve=>setTimeout(resolve,400));
-      localStorage.setItem('concept-atlas-v3-feed',JSON.stringify(atlas));
-      localStorage.setItem('ipe-atlas-bridge-v1',JSON.stringify(bridge));
-      if(typeof global.invalidateBridgeCache==='function')global.invalidateBridgeCache();
-      const appliedAudit=validate(localPayload());
-      if(!appliedAudit.ok||appliedAudit.conceptCount!==atlas.concepts.length)throw new Error('가져온 Atlas가 iframe 반영 중 덮어써져 적용을 중단함');
-      dirty=true;setMeta({dirty:true,lastDirtyAt:new Date().toISOString(),lastReason:'atlas-backup-import',lastConflict:''});
-    }finally{importInProgress=false}
-    return {audit,integrated,removedDangling:(candidate.bridge.links||[]).length-(bridge.links||[]).length};
+  async function loadRevision(revision){
+    const c=cfg(),identity=await ids(c.syncKey);
+    const rows=await rpc('ipe_load_revision',{
+      p_sync_id:identity.syncId,
+      p_write_hash:identity.writeHash,
+      p_revision:Number(revision),
+    });
+    const row=Array.isArray(rows)?rows[0]||null:rows;
+    if(!row)throw new Error(`서버 revision ${revision}을 찾을 수 없음`);
+    const candidate={version:2,app:row.app_state,atlas:row.atlas_state,bridge:row.bridge_state};
+    const result=await applyCandidate(candidate,{source:`server-revision-${revision}`});
+    return {...result,revision:Number(revision)};
   }
-  function panel(){const m=meta();return `<section class="panel"><div class="panel-head"><div><div class="panel-title">정규화 저장소 v2</div><div class="panel-note">개념·노트·관계·학습 연결 분리 저장 · revision 충돌 차단 · append-only 복구 이력</div></div><span class="chip">revision ${Number(m.serverRevision)||0}</span></div><div class="panel-body"><div class="notice">접속 시 자동 덮어쓰기는 비활성화됨. 실제 데이터 해시가 달라질 때만 커밋하며, 다른 기기가 먼저 저장했으면 현재 로컬을 유지하고 충돌로 중단한다.</div><div class="cloud-actions" style="margin-top:12px"><button class="primary" data-v2-action="commit">현재 데이터 커밋</button><button data-v2-action="pull">원격 revision 확인·적용</button><button data-v2-action="history">revision 이력</button><button data-v2-action="copy-sql">v2 SQL 복사</button><button data-v2-action="audit">무결성 점검</button><button data-v2-action="import-atlas">Atlas 백업 가져오기</button><input id="v2AtlasBackupInput" type="file" accept="application/json,.json" hidden></div><div class="cloud-status" id="v2SyncStatus" style="margin-top:12px">${m.dirty?'로컬 변경 있음 · 원격 커밋 대기':'로컬 변경 없음'}${m.lastCommitAt?`<br>마지막 커밋: ${m.lastCommitAt}`:''}${m.lastConflict?`<br>충돌: ${m.lastConflict}`:''}</div></div></section>`}
-  function install(){
-    if(installed)return;installed=true;meta();
-    const currentCfg=cfg();if(currentCfg)currentCfg.autoPull=false;
-    global.v14TryStartupPull=function(){};
-    global.cloudUploadNow=()=>commit('manual-or-auto');
-    global.cloudDownloadNow=()=>pull();
-    global.exportData=function(){
-      const payload=localPayload(),blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}),anchor=document.createElement('a');
-      anchor.href=URL.createObjectURL(blob);anchor.download=`IPE_LearningOS_revision_${meta().serverRevision}_${new Date().toISOString().slice(0,10)}.json`;anchor.click();URL.revokeObjectURL(anchor.href);
-      global.showToast?.('현재 부모 저장소 기준 통합 백업을 내보냈어.');
+  async function startupCheck(){
+    updateStatusUI(meta());
+    if(!enabled()){
+      setMeta({serverState:'unconfigured'});
+      return;
+    }
+    if(meta().restorePending){
+      setMeta({serverState:'restore-pending'});
+      return;
+    }
+    try{
+      const remote=await head();
+      if(!remote){
+        setMeta({serverState:meta().dirty?'queued':'empty'});
+        return;
+      }
+      const payload=await collectPayload({flush:false});
+      const localHash=await sha256(stable(payload));
+      if(localHash===remote.payload_hash){
+        setMeta({
+          serverRevision:Number(remote.revision)||0,
+          lastPayloadHash:remote.payload_hash,
+          dirty:false,
+          serverState:'saved',
+          lastCommitAt:remote.created_at||meta().lastCommitAt,
+          lastError:'',
+        });
+      }else if(Number(meta().serverRevision)===Number(remote.revision)&&meta().dirty){
+        setMeta({serverState:'queued'});
+        commitTimer=setTimeout(()=>flushNow('startup-pending',{manual:false}).catch(()=>{}),900);
+      }else{
+        setMeta({serverState:'conflict',lastConflict:'로컬과 서버 데이터가 다름 · 자동 덮어쓰기 중단'});
+      }
+    }catch(error){
+      setMeta({serverState:navigator.onLine===false?'offline':'failed',lastError:error.message});
+    }
+  }
+
+  function localStatus(value){
+    if(value.localState==='saving')return {text:'로컬 · 저장 중',tone:'busy'};
+    if(value.localState==='failed')return {text:'로컬 · 저장 실패',tone:'error'};
+    return {text:'로컬 · 저장됨',tone:'ok'};
+  }
+  function serverStatus(value){
+    const revision=Number(value.serverRevision)||0;
+    const map={
+      unconfigured:['서버 · 연결 안 됨','warn'],
+      empty:['서버 · 첫 저장 대기','warn'],
+      queued:['서버 · 저장 대기','warn'],
+      saving:['서버 · 저장 중','busy'],
+      saved:[`서버 · r${revision} 저장됨`,'ok'],
+      offline:['서버 · 오프라인','warn'],
+      conflict:['서버 · 충돌 확인 필요','error'],
+      blocked:['서버 · 무결성 차단','error'],
+      failed:['서버 · 저장 실패','error'],
+      'restore-pending':['서버 · 복구 확인 대기','warn'],
     };
-    const baseSettings=global.renderSettings;
-    global.renderSettings=function(){return baseSettings()+panel()};
-    const baseSave=global.save;
-    global.save=function(message){const result=baseSave(message);schedule('app-data-change',700);return result};
-    window.addEventListener('message',event=>{if(event.data?.type!=='ipe-atlas-saved')return;const guard=global.__ipeNormalizedImportGuard;if(importInProgress||guard)return;schedule('atlas-commit',350)},false);
-    document.addEventListener('click',async event=>{
-      const button=event.target.closest('[data-v2-action]');if(!button)return;
-      event.preventDefault();event.stopImmediatePropagation();
+    const selected=map[value.serverState]||map.unconfigured;
+    return {text:selected[0],tone:selected[1]};
+  }
+  function updateStatusUI(value=meta()){
+    if(typeof document==='undefined')return;
+    const local=localStatus(value),server=serverStatus(value);
+    const localEl=document.getElementById('localSyncState');
+    const serverEl=document.getElementById('serverSyncState');
+    if(localEl){localEl.textContent=local.text;localEl.dataset.tone=local.tone;localEl.title=value.lastLocalAt?`마지막 로컬 저장 ${value.lastLocalAt}`:''}
+    if(serverEl){serverEl.textContent=server.text;serverEl.dataset.tone=server.tone;serverEl.title=value.lastError||value.lastConflict||(value.lastCommitAt?`마지막 서버 저장 ${value.lastCommitAt}`:'')}
+    const box=document.getElementById('v2SyncStatus');
+    if(box)box.innerHTML=statusHtml(value);
+  }
+  function statusHtml(value=meta()){
+    const local=localStatus(value),server=serverStatus(value);
+    return `<b>${escapeHtml(local.text)}</b> · <b>${escapeHtml(server.text)}</b>`+
+      (value.lastLocalAt?`<br>마지막 로컬 저장: ${escapeHtml(value.lastLocalAt)}`:'')+
+      (value.lastCommitAt?`<br>마지막 서버 저장: ${escapeHtml(value.lastCommitAt)}`:'')+
+      (value.lastBackupAt?`<br>마지막 파일 백업: ${escapeHtml(value.lastBackupAt)}`:'')+
+      (value.lastError?`<br>오류: ${escapeHtml(value.lastError)}`:'')+
+      (value.lastConflict?`<br>충돌: ${escapeHtml(value.lastConflict)}`:'');
+  }
+  function panel(){
+    const c=cfg()||{};
+    const m=meta();
+    return `<section class="panel"><div class="panel-head"><div><div class="panel-title">저장·백업·복구</div><div class="panel-note">App·Atlas·Bridge를 하나의 데이터 흐름으로 로컬 저장하고 Supabase revision에 자동 커밋한다.</div></div><span class="chip">revision ${Number(m.serverRevision)||0}</span></div><div class="panel-body">`+
+      `<div class="cloud-status" id="v2SyncStatus">${statusHtml(m)}</div>`+
+      `<div class="cloud-actions"><button class="primary" data-sync-action="save">지금 저장</button><button data-sync-action="backup">통합 백업 다운로드</button><button data-sync-action="pick-import">백업 가져오기</button><button data-sync-action="pull">서버 최신 revision 적용</button><button data-sync-action="history">revision 이력</button><button data-sync-action="audit">무결성 점검</button></div>`+
+      `<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--soft);font-weight:800">Supabase 연결·고급 설정</summary><div class="cloud-grid" style="margin-top:12px">`+
+      `<div class="setting"><label>Supabase Project URL</label><input id="sbUrl" value="${escapeHtml(c.url||'')}" placeholder="https://xxxxx.supabase.co"></div>`+
+      `<div class="setting"><label>Publishable / Anon Key</label><input id="sbAnonKey" type="password" value="${escapeHtml(c.anonKey||'')}"></div>`+
+      `<div class="setting cloud-wide"><label>동기화 키</label><input id="sbSyncKey" type="password" value="${escapeHtml(c.syncKey||'')}"><div class="help">연결 정보는 이 브라우저에만 저장되며 백업·서버 payload에는 포함되지 않는다.</div></div>`+
+      `</div><div class="cloud-actions"><button data-sync-action="save-config">연결 정보 저장·확인</button><button data-sync-action="copy-sql">v2 SQL 복사</button></div></details>`+
+      `</div></section>`;
+  }
+  function stripLegacySettings(html){
+    const template=document.createElement('template');
+    template.innerHTML=html;
+    for(const section of template.content.querySelectorAll('section.panel')){
+      const title=section.querySelector('.panel-title')?.textContent||'';
+      if(/Supabase 원격 동기화|데이터 흐름 안정성 점검|정규화 저장소 v2/.test(title))section.remove();
+    }
+    return template.innerHTML;
+  }
+  async function handleAction(action,button=null){
+    if(action==='save'){
+      const result=await flushNow('manual',{manual:true});
+      if(result.localOnly)global.showToast?.('로컬 저장 완료 · 서버 연결 정보를 설정하면 자동 동기화돼.');
+      else global.showToast?.(result.skipped?'최신 데이터가 이미 서버에 저장되어 있어.':`서버 revision ${result.revision||result.row?.revision} 저장·검증 완료`);
+    }
+    if(action==='backup')await createBackup();
+    if(action==='pick-import')document.getElementById('syncImportFile')?.click();
+    if(action==='pull')await pull();
+    if(action==='history'){
+      const rows=await history();
       const status=document.getElementById('v2SyncStatus');
-      try{
-        if(button.dataset.v2Action==='commit'){const result=await commit('manual');if(status)status.textContent=result.skipped?'변경 없음 · 커밋 생략':`revision ${result.row?.revision} 커밋 완료`}
-        if(button.dataset.v2Action==='pull'){const result=await pull();if(status&&!result.cancelled)status.textContent=`revision ${result.remote.revision} 적용 완료`}
-        if(button.dataset.v2Action==='history'){const rows=await history();if(status)status.innerHTML=(rows||[]).map(row=>`r${row.revision} · 개념 ${row.concept_count} · 연결 ${row.bridge_link_count} · ${row.device_id} · ${row.created_at}`).join('<br>')||'revision 없음'}
-        if(button.dataset.v2Action==='copy-sql'){const sql=await (await fetch('supabase-normalized-v2.sql')).text();await navigator.clipboard.writeText(sql);if(status)status.textContent='v2 SQL 복사 완료'}
-        if(button.dataset.v2Action==='audit'){const audit=validate(localPayload());if(status)status.textContent=audit.ok?`정상 · 개념 ${audit.conceptCount} · 연결 ${audit.linkCount}`:`오류 · ${audit.errors.join(' / ')}`}
-        if(button.dataset.v2Action==='import-atlas'){
-          if(typeof global.cloudReadInputs==='function')global.cloudReadInputs();
-          const current=cfg();if(current){current.auto=false;current.autoPull=false}
-          const app=typeof global.__ipeGetAppState==='function'?global.__ipeGetAppState():null;
-          if(app)localStorage.setItem('ipe-learning-os-v4',JSON.stringify(app));
-          global.render?.();
-          setTimeout(()=>document.getElementById('v2AtlasBackupInput')?.click(),0);
-        }
-      }catch(error){if(status)status.textContent='실패 · '+error.message;global.showToast?.(error.message)}
+      if(status)status.innerHTML=(rows||[]).map(row=>
+        `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin:6px 0">`+
+        `<span>r${row.revision} · 개념 ${row.concept_count} · 연결 ${row.bridge_link_count} · ${escapeHtml(row.created_at)}</span>`+
+        `<button class="small" data-sync-action="restore-revision" data-revision="${row.revision}">이 revision 복구</button></div>`
+      ).join('')||'revision 없음';
+    }
+    if(action==='restore-revision')await loadRevision(button?.dataset.revision);
+    if(action==='audit'){
+      const payload=await collectPayload({flush:true});
+      const audit=validate(payload);
+      if(!audit.ok)throw new Error(audit.errors.join(' / '));
+      const c=counts(payload);
+      global.showToast?.(`무결성 정상 · 개념 ${c.concepts} · 활성 연결 ${c.activeLinks} · 고아 연결 ${c.orphanedLinks}`);
+      updateStatusUI(meta());
+    }
+    if(action==='save-config'){
+      const c=cfg();
+      c.url=(document.getElementById('sbUrl')?.value||'').trim().replace(/\/+$/,'');
+      c.anonKey=(document.getElementById('sbAnonKey')?.value||'').trim();
+      c.syncKey=(document.getElementById('sbSyncKey')?.value||'').trim();
+      c.auto=false;
+      c.autoPull=false;
+      localStorage.setItem(APP_KEY,JSON.stringify(global.__ipeGetAppState?.()||{}));
+      setMeta({serverState:enabled()?'queued':'unconfigured',lastError:''});
+      await startupCheck();
+      global.showToast?.('연결 정보를 이 브라우저에 저장하고 서버 상태를 확인했어.');
+    }
+    if(action==='copy-sql'){
+      const sql=await (await fetch('supabase-normalized-v2.sql')).text();
+      await navigator.clipboard.writeText(sql);
+      global.showToast?.('정규화 저장소 v2 SQL을 복사했어.');
+    }
+  }
+  function install(){
+    if(installed)return;
+    installed=true;
+    const currentCfg=cfg();
+    if(currentCfg){currentCfg.auto=false;currentCfg.autoPull=false}
+    global.v14TryStartupPull=function(){};
+    global.cloudUploadNow=()=>flushNow('manual-or-auto',{manual:true});
+    global.cloudDownloadNow=()=>pull();
+    global.exportData=()=>createBackup();
+    global.importData=file=>importFile(file);
+
+    const baseSettings=global.renderSettings;
+    global.renderSettings=function(){return stripLegacySettings(baseSettings())+panel()};
+    const baseSave=global.save;
+    global.save=function(message){
+      const result=baseSave(message);
+      markChanged('app-data-change',700);
+      return result;
+    };
+
+    window.addEventListener('message',event=>{
+      const data=event.data||{};
+      if(data.type==='ipe-atlas-saved'){
+        const frames=typeof global.v17ActiveAtlasFrames==='function'?global.v17ActiveAtlasFrames():[];
+        if(frames.length&&!frames.some(frame=>frame.contentWindow===event.source))return;
+        const guard=global.__ipeNormalizedImportGuard;
+        if(importInProgress||(guard&&Date.now()<guard.until))return;
+        markChanged('atlas-data-change',800);
+      }
+      if(data.type==='ipe-atlas-bridge-updated')markChanged('bridge-data-change',550);
+    },false);
+    document.addEventListener('click',async event=>{
+      const button=event.target.closest('[data-sync-action]');
+      if(!button)return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      button.disabled=true;
+      try{await handleAction(button.dataset.syncAction,button)}
+      catch(error){setMeta({lastError:error.message});global.showToast?.(error.message)}
+      finally{button.disabled=false}
     },true);
     document.addEventListener('change',async event=>{
-      if(event.target.id!=='v2AtlasBackupInput'||!event.target.files?.[0])return;
-      const status=document.getElementById('v2SyncStatus');
-      try{const result=await importAtlasFile(event.target.files[0]);if(status)status.textContent=`${result.integrated?'통합':'Atlas'} 백업 적용 완료 · 개념 ${result.audit.conceptCount} · 고아 연결 ${result.removedDangling}개 별도 보존 · 원격 커밋 대기`}
-      catch(error){if(status)status.textContent='백업 적용 실패 · '+error.message}
+      if(event.target.id!=='syncImportFile'||!event.target.files?.[0])return;
+      try{await importFile(event.target.files[0])}
+      catch(error){setMeta({lastError:error.message});global.showToast?.('백업 적용 실패: '+error.message)}
       finally{event.target.value=''}
     },true);
+    window.addEventListener('online',()=>{
+      if(meta().dirty&&!meta().restorePending)flushNow('online-retry',{manual:false}).catch(()=>{});
+      else startupCheck();
+    });
+    window.addEventListener('offline',()=>setMeta({serverState:meta().dirty?'offline':meta().serverState}));
+    window.addEventListener('keydown',event=>{
+      if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='s'){
+        event.preventDefault();
+        handleAction('save').catch(error=>global.showToast?.(error.message));
+      }
+    });
+    updateStatusUI(meta());
+    setTimeout(()=>startupCheck(),250);
   }
-  global.IpeNormalizedSync={install,commit,pull,history,schedule,validate,localPayload,importAtlasFile,meta};
+
+  global.IpeNormalizedSync={
+    install,
+    flushNow,
+    commit:flushNow,
+    pull,
+    history,
+    loadRevision,
+    schedule:markChanged,
+    validate,
+    localPayload,
+    collectPayload,
+    createBackup,
+    importFile,
+    importAtlasFile,
+    meta,
+    counts,
+    startupCheck,
+  };
 })(window);

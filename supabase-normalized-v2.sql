@@ -474,8 +474,39 @@ begin
 end;
 $$;
 
+create or replace function public.ipe_load_revision(
+  p_sync_id text,
+  p_write_hash text,
+  p_revision bigint
+) returns table(
+  revision bigint,
+  operation_id uuid,
+  device_id text,
+  payload_hash text,
+  app_state jsonb,
+  atlas_state jsonb,
+  bridge_state jsonb,
+  created_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists(select 1 from public.ipe_workspaces where sync_id=p_sync_id and write_hash=p_write_hash) then
+    raise exception using errcode='28000', message='invalid sync key';
+  end if;
+  return query
+    select r.revision,r.operation_id,r.device_id,r.payload_hash,r.app_state,r.atlas_state,r.bridge_state,r.created_at
+    from public.ipe_revisions r
+    where r.sync_id=p_sync_id and r.revision=p_revision
+    limit 1;
+end;
+$$;
+
 grant execute on function public.ipe_commit_state(text,text,bigint,uuid,text,text,jsonb,jsonb,jsonb) to anon, authenticated;
 grant execute on function public.ipe_load_head(text,text) to anon, authenticated;
 grant execute on function public.ipe_list_revisions(text,text,integer) to anon, authenticated;
+grant execute on function public.ipe_load_revision(text,text,bigint) to anon, authenticated;
 
 notify pgrst, 'reload schema';
