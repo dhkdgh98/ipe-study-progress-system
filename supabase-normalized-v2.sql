@@ -6,9 +6,13 @@ create table if not exists public.ipe_workspaces (
   sync_id text primary key,
   write_hash text not null,
   head_revision bigint not null default 0,
+  protocol_version integer not null default 2,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.ipe_workspaces
+  add column if not exists protocol_version integer not null default 2;
 
 create table if not exists public.ipe_revisions (
   sync_id text not null references public.ipe_workspaces(sync_id) on delete cascade,
@@ -23,6 +27,50 @@ create table if not exists public.ipe_revisions (
   bridge_link_count integer not null,
   created_at timestamptz not null default now(),
   primary key (sync_id, revision),
+  unique (sync_id, operation_id)
+);
+
+create table if not exists public.ipe_working_snapshots (
+  sync_id text primary key references public.ipe_workspaces(sync_id) on delete cascade,
+  revision bigint not null,
+  operation_id uuid not null,
+  device_id text not null,
+  payload_hash text not null,
+  app_state jsonb not null,
+  atlas_state jsonb not null,
+  bridge_state jsonb not null,
+  concept_count integer not null,
+  bridge_link_count integer not null,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.ipe_commit_receipts (
+  sync_id text not null references public.ipe_workspaces(sync_id) on delete cascade,
+  operation_id uuid not null,
+  revision bigint not null,
+  payload_hash text not null,
+  committed_at timestamptz not null default now(),
+  primary key (sync_id, operation_id)
+);
+
+create table if not exists public.ipe_history_snapshots (
+  sync_id text not null references public.ipe_workspaces(sync_id) on delete cascade,
+  history_id uuid not null,
+  operation_id uuid not null,
+  source_revision bigint not null,
+  device_id text not null,
+  device_alias text not null,
+  payload_hash text not null,
+  label text not null,
+  reason text not null,
+  context jsonb not null default '{}'::jsonb,
+  app_state jsonb not null,
+  atlas_state jsonb not null,
+  bridge_state jsonb not null,
+  concept_count integer not null,
+  bridge_link_count integer not null,
+  created_at timestamptz not null default now(),
+  primary key (sync_id, history_id),
   unique (sync_id, operation_id)
 );
 
@@ -158,6 +206,10 @@ create table if not exists public.ipe_keywords (
 
 create index if not exists ipe_revisions_recent
   on public.ipe_revisions(sync_id, revision desc);
+create index if not exists ipe_history_recent
+  on public.ipe_history_snapshots(sync_id, created_at desc);
+create index if not exists ipe_receipts_recent
+  on public.ipe_commit_receipts(sync_id, committed_at desc);
 create index if not exists ipe_lines_by_concept
   on public.ipe_concept_lines(sync_id, concept_id, section, order_index);
 create index if not exists ipe_study_links_by_item
@@ -165,6 +217,9 @@ create index if not exists ipe_study_links_by_item
 
 alter table public.ipe_workspaces enable row level security;
 alter table public.ipe_revisions enable row level security;
+alter table public.ipe_working_snapshots enable row level security;
+alter table public.ipe_commit_receipts enable row level security;
+alter table public.ipe_history_snapshots enable row level security;
 alter table public.ipe_app_state enable row level security;
 alter table public.ipe_concepts enable row level security;
 alter table public.ipe_concept_lines enable row level security;
@@ -179,6 +234,9 @@ alter table public.ipe_keywords enable row level security;
 
 revoke all on public.ipe_workspaces from anon, authenticated;
 revoke all on public.ipe_revisions from anon, authenticated;
+revoke all on public.ipe_working_snapshots from anon, authenticated;
+revoke all on public.ipe_commit_receipts from anon, authenticated;
+revoke all on public.ipe_history_snapshots from anon, authenticated;
 revoke all on public.ipe_app_state from anon, authenticated;
 revoke all on public.ipe_concepts from anon, authenticated;
 revoke all on public.ipe_concept_lines from anon, authenticated;
@@ -190,6 +248,19 @@ revoke all on public.ipe_frames from anon, authenticated;
 revoke all on public.ipe_frame_members from anon, authenticated;
 revoke all on public.ipe_objects from anon, authenticated;
 revoke all on public.ipe_keywords from anon, authenticated;
+
+-- Seed the mutable working head from the last legacy append-only revision.
+-- Re-running this migration never overwrites a newer working snapshot.
+insert into public.ipe_working_snapshots(
+  sync_id,revision,operation_id,device_id,payload_hash,
+  app_state,atlas_state,bridge_state,concept_count,bridge_link_count,updated_at
+)
+select r.sync_id,r.revision,r.operation_id,r.device_id,r.payload_hash,
+  r.app_state,r.atlas_state,r.bridge_state,r.concept_count,r.bridge_link_count,r.created_at
+from public.ipe_revisions r
+join public.ipe_workspaces w
+  on w.sync_id=r.sync_id and w.head_revision=r.revision
+on conflict(sync_id) do nothing;
 
 create or replace function public.ipe_assert_state(
   p_atlas jsonb,
@@ -251,7 +322,7 @@ begin
 end;
 $$;
 
-create or replace function public.ipe_commit_state(
+create or replace function public.ipe_commit_working_state(
   p_sync_id text,
   p_write_hash text,
   p_expected_revision bigint,
@@ -260,7 +331,8 @@ create or replace function public.ipe_commit_state(
   p_payload_hash text,
   p_app jsonb,
   p_atlas jsonb,
-  p_bridge jsonb
+  p_bridge jsonb,
+  p_protocol_version integer
 ) returns table(revision bigint, committed_at timestamptz, replayed boolean)
 language plpgsql
 security definer
@@ -289,6 +361,9 @@ begin
   if coalesce(p_operation_id::text,'')='' then
     raise exception using errcode='22023', message='missing operation id';
   end if;
+  if coalesce(p_protocol_version,0) <> 3 then
+    raise exception using errcode='0A000', message='client upgrade required: protocol 3';
+  end if;
   perform public.ipe_assert_state(p_atlas,p_bridge);
 
   insert into public.ipe_workspaces(sync_id,write_hash,head_revision)
@@ -301,11 +376,11 @@ begin
     raise exception using errcode='28000', message='invalid sync key';
   end if;
 
-  select r.revision into v_revision from public.ipe_revisions r
+  select r.revision into v_revision from public.ipe_commit_receipts r
     where r.sync_id=p_sync_id and r.operation_id=p_operation_id;
   if found then
     return query select v_revision,
-      (select r.created_at from public.ipe_revisions r where r.sync_id=p_sync_id and r.revision=v_revision),
+      (select r.committed_at from public.ipe_commit_receipts r where r.sync_id=p_sync_id and r.operation_id=p_operation_id),
       true;
     return;
   end if;
@@ -317,8 +392,8 @@ begin
   end if;
   v_revision := v_workspace.head_revision + 1;
 
-  -- Replace the normalized current projection inside one transaction. The
-  -- append-only ipe_revisions row below retains every committed generation.
+  -- Replace the normalized current projection and mutable working snapshot
+  -- inside one transaction. Named recovery history is created separately.
   delete from public.ipe_app_state where sync_id=p_sync_id;
   delete from public.ipe_line_keywords where sync_id=p_sync_id;
   delete from public.ipe_concept_lines where sync_id=p_sync_id;
@@ -417,18 +492,34 @@ begin
     v_index := v_index + 1;
   end loop;
 
-  insert into public.ipe_revisions(sync_id,revision,operation_id,device_id,payload_hash,app_state,atlas_state,bridge_state,concept_count,bridge_link_count,created_at)
+  insert into public.ipe_working_snapshots(sync_id,revision,operation_id,device_id,payload_hash,app_state,atlas_state,bridge_state,concept_count,bridge_link_count,updated_at)
   values(p_sync_id,v_revision,p_operation_id,left(coalesce(p_device_id,'unknown'),200),p_payload_hash,
     coalesce(p_app,'{}'::jsonb),coalesce(p_atlas,'{}'::jsonb),coalesce(p_bridge,'{}'::jsonb),
     jsonb_array_length(coalesce(p_atlas->'concepts','[]'::jsonb)),
-    jsonb_array_length(coalesce(p_bridge->'links','[]'::jsonb)),v_now);
+    jsonb_array_length(coalesce(p_bridge->'links','[]'::jsonb)),v_now)
+  on conflict(sync_id) do update set
+    revision=excluded.revision,
+    operation_id=excluded.operation_id,
+    device_id=excluded.device_id,
+    payload_hash=excluded.payload_hash,
+    app_state=excluded.app_state,
+    atlas_state=excluded.atlas_state,
+    bridge_state=excluded.bridge_state,
+    concept_count=excluded.concept_count,
+    bridge_link_count=excluded.bridge_link_count,
+    updated_at=excluded.updated_at;
 
-  update public.ipe_workspaces set head_revision=v_revision,updated_at=v_now where sync_id=p_sync_id;
+  insert into public.ipe_commit_receipts(sync_id,operation_id,revision,payload_hash,committed_at)
+    values(p_sync_id,p_operation_id,v_revision,p_payload_hash,v_now);
+
+  update public.ipe_workspaces
+    set head_revision=v_revision,protocol_version=3,updated_at=v_now
+    where sync_id=p_sync_id;
   return query select v_revision,v_now,false;
 end;
 $$;
 
-create or replace function public.ipe_load_head(
+create or replace function public.ipe_load_working_head(
   p_sync_id text,
   p_write_hash text
 ) returns table(
@@ -450,8 +541,8 @@ begin
     raise exception using errcode='28000', message='invalid sync key';
   end if;
   return query
-    select r.revision,r.operation_id,r.device_id,r.payload_hash,r.app_state,r.atlas_state,r.bridge_state,r.created_at
-    from public.ipe_revisions r join public.ipe_workspaces w on w.sync_id=r.sync_id and w.head_revision=r.revision
+    select r.revision,r.operation_id,r.device_id,r.payload_hash,r.app_state,r.atlas_state,r.bridge_state,r.updated_at
+    from public.ipe_working_snapshots r join public.ipe_workspaces w on w.sync_id=r.sync_id and w.head_revision=r.revision
     where r.sync_id=p_sync_id;
 end;
 $$;
@@ -504,6 +595,179 @@ begin
 end;
 $$;
 
+create or replace function public.ipe_create_history_snapshot(
+  p_sync_id text,
+  p_write_hash text,
+  p_expected_revision bigint,
+  p_operation_id uuid,
+  p_device_id text,
+  p_device_alias text,
+  p_payload_hash text,
+  p_label text,
+  p_reason text,
+  p_context jsonb,
+  p_app jsonb,
+  p_atlas jsonb,
+  p_bridge jsonb,
+  p_protocol_version integer
+) returns table(history_id uuid, created_at timestamptz, replayed boolean)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_now timestamptz := now();
+  v_history_id uuid := p_operation_id;
+begin
+  if coalesce(p_protocol_version,0) <> 3 then
+    raise exception using errcode='0A000', message='client upgrade required: protocol 3';
+  end if;
+  if not exists(
+    select 1 from public.ipe_workspaces
+    where sync_id=p_sync_id and write_hash=p_write_hash
+  ) then
+    raise exception using errcode='28000', message='invalid sync key';
+  end if;
+  if coalesce(p_operation_id::text,'')='' then
+    raise exception using errcode='22023', message='missing history operation id';
+  end if;
+  perform public.ipe_assert_state(p_atlas,p_bridge);
+
+  select h.history_id,h.created_at
+    into v_history_id,v_now
+  from public.ipe_history_snapshots h
+  where h.sync_id=p_sync_id and h.operation_id=p_operation_id;
+  if found then
+    return query select v_history_id,v_now,true;
+    return;
+  end if;
+
+  insert into public.ipe_history_snapshots(
+    sync_id,history_id,operation_id,source_revision,device_id,device_alias,
+    payload_hash,label,reason,context,app_state,atlas_state,bridge_state,
+    concept_count,bridge_link_count,created_at
+  ) values (
+    p_sync_id,v_history_id,p_operation_id,greatest(0,coalesce(p_expected_revision,0)),
+    left(coalesce(p_device_id,'unknown'),200),
+    left(coalesce(nullif(trim(p_device_alias),''),'내 기기'),80),
+    p_payload_hash,left(coalesce(nullif(trim(p_label),''),'전체 학습 상태'),240),
+    left(coalesce(p_reason,'named-history'),80),coalesce(p_context,'{}'::jsonb),
+    coalesce(p_app,'{}'::jsonb),coalesce(p_atlas,'{}'::jsonb),coalesce(p_bridge,'{}'::jsonb),
+    jsonb_array_length(coalesce(p_atlas->'concepts','[]'::jsonb)),
+    jsonb_array_length(coalesce(p_bridge->'links','[]'::jsonb)),v_now
+  );
+  return query select v_history_id,v_now,false;
+end;
+$$;
+
+create or replace function public.ipe_list_history(
+  p_sync_id text,
+  p_write_hash text,
+  p_limit integer default 30
+) returns table(
+  history_id uuid,
+  label text,
+  reason text,
+  device_alias text,
+  payload_hash text,
+  concept_count integer,
+  bridge_link_count integer,
+  created_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists(select 1 from public.ipe_workspaces where sync_id=p_sync_id and write_hash=p_write_hash) then
+    raise exception using errcode='28000', message='invalid sync key';
+  end if;
+  return query
+    select h.history_id,h.label,h.reason,h.device_alias,h.payload_hash,
+      h.concept_count,h.bridge_link_count,h.created_at
+    from public.ipe_history_snapshots h
+    where h.sync_id=p_sync_id
+    order by h.created_at desc
+    limit greatest(1,least(coalesce(p_limit,30),200));
+end;
+$$;
+
+create or replace function public.ipe_load_history(
+  p_sync_id text,
+  p_write_hash text,
+  p_history_id uuid
+) returns table(
+  history_id uuid,
+  label text,
+  payload_hash text,
+  app_state jsonb,
+  atlas_state jsonb,
+  bridge_state jsonb,
+  created_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists(select 1 from public.ipe_workspaces where sync_id=p_sync_id and write_hash=p_write_hash) then
+    raise exception using errcode='28000', message='invalid sync key';
+  end if;
+  return query
+    select h.history_id,h.label,h.payload_hash,h.app_state,h.atlas_state,h.bridge_state,h.created_at
+    from public.ipe_history_snapshots h
+    where h.sync_id=p_sync_id and h.history_id=p_history_id
+    limit 1;
+end;
+$$;
+
+-- Obsolete clients used this RPC and created a user-visible revision for every
+-- autosave. Reject them so a long-offline device cannot bypass protocol 3.
+create or replace function public.ipe_commit_state(
+  p_sync_id text,
+  p_write_hash text,
+  p_expected_revision bigint,
+  p_operation_id uuid,
+  p_device_id text,
+  p_payload_hash text,
+  p_app jsonb,
+  p_atlas jsonb,
+  p_bridge jsonb
+) returns table(revision bigint, committed_at timestamptz, replayed boolean)
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  raise exception using errcode='0A000', message='client upgrade required: protocol 3';
+end;
+$$;
+
+create or replace function public.ipe_load_head(
+  p_sync_id text,
+  p_write_hash text
+) returns table(
+  revision bigint,
+  operation_id uuid,
+  device_id text,
+  payload_hash text,
+  app_state jsonb,
+  atlas_state jsonb,
+  bridge_state jsonb,
+  created_at timestamptz
+)
+language sql
+security definer
+set search_path = public
+as $$
+  select * from public.ipe_load_working_head(p_sync_id,p_write_hash);
+$$;
+
+grant execute on function public.ipe_commit_working_state(text,text,bigint,uuid,text,text,jsonb,jsonb,jsonb,integer) to anon, authenticated;
+grant execute on function public.ipe_load_working_head(text,text) to anon, authenticated;
+grant execute on function public.ipe_create_history_snapshot(text,text,bigint,uuid,text,text,text,text,text,jsonb,jsonb,jsonb,jsonb,integer) to anon, authenticated;
+grant execute on function public.ipe_list_history(text,text,integer) to anon, authenticated;
+grant execute on function public.ipe_load_history(text,text,uuid) to anon, authenticated;
 grant execute on function public.ipe_commit_state(text,text,bigint,uuid,text,text,jsonb,jsonb,jsonb) to anon, authenticated;
 grant execute on function public.ipe_load_head(text,text) to anon, authenticated;
 grant execute on function public.ipe_list_revisions(text,text,integer) to anon, authenticated;

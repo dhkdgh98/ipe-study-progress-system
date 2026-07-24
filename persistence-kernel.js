@@ -2,7 +2,7 @@
   'use strict';
 
   const DB_NAME='ipe-learning-os-kernel';
-  const DB_VERSION=1;
+  const DB_VERSION=2;
   const FALLBACK_KEY='ipe-persistence-kernel-fallback-v1';
   const SNAPSHOT_KEY='working';
   const CHANNEL_NAME='ipe-persistence-kernel-v1';
@@ -103,6 +103,12 @@
           outbox.createIndex('status','status',{unique:false});
           outbox.createIndex('createdAt','createdAt',{unique:false});
         }
+        if(!db.objectStoreNames.contains('historyOutbox')){
+          const historyOutbox=db.createObjectStore('historyOutbox',{keyPath:'operationId'});
+          historyOutbox.createIndex('workspaceKey','workspaceKey',{unique:false});
+          historyOutbox.createIndex('status','status',{unique:false});
+          historyOutbox.createIndex('createdAt','createdAt',{unique:false});
+        }
       };
       request.onsuccess=()=>resolve(request.result);
       request.onerror=()=>reject(request.error||new Error('IndexedDB open failed'));
@@ -126,7 +132,7 @@
     }
   }
 
-  function emptyFallback(){return {snapshots:{},meta:{},checkpoints:{},outbox:{}}}
+  function emptyFallback(){return {snapshots:{},meta:{},checkpoints:{},outbox:{},historyOutbox:{}}}
   function fallbackState(){
     if(fallbackCache)return fallbackCache;
     try{
@@ -134,7 +140,7 @@
     }catch{
       fallbackCache=emptyFallback();
     }
-    for(const key of ['snapshots','meta','checkpoints','outbox'])fallbackCache[key]||={};
+    for(const key of ['snapshots','meta','checkpoints','outbox','historyOutbox'])fallbackCache[key]||={};
     return fallbackCache;
   }
   function saveFallback(){
@@ -429,6 +435,99 @@
     return targets.length;
   }
 
+  function buildHistoryOperation(snapshot,remote,{reason='named-history',label='',context={}}={}){
+    return {
+      operationId:makeId(),
+      workspaceKey:remote.workspaceKey,
+      syncId:remote.syncId,
+      writeHash:remote.writeHash,
+      expectedRevision:Number(remote.expectedRevision)||0,
+      deviceId:remote.deviceId||instanceId,
+      deviceAlias:remote.deviceAlias||'기기',
+      payloadHash:snapshot.payloadHash,
+      payload:clone(snapshot.payload),
+      generation:snapshot.generation,
+      reason,
+      label,
+      context:clone(context),
+      status:'pending',
+      attemptCount:0,
+      createdAt:iso(),
+      updatedAt:iso(),
+      lastAttemptAt:'',
+      nextAttemptAt:'',
+      lastError:'',
+    };
+  }
+  async function ensureHistoryOutbox(remote,{reason='named-history',label='',context={}}={}){
+    const snapshot=await readSnapshot();
+    if(!snapshot)throw new Error('복구 기록에 넣을 로컬 스냅샷이 없음');
+    const rows=await allRecords('historyOutbox');
+    const current=rows.find(item=>
+      item.workspaceKey===remote.workspaceKey&&item.payloadHash===snapshot.payloadHash&&
+      ['pending','sending'].includes(item.status)
+    );
+    if(current)return current;
+    const operation=buildHistoryOperation(snapshot,remote,{reason,label,context});
+    await putRecord('historyOutbox',operation);
+    emit('history-outbox-queued',{workspaceKey:remote.workspaceKey,operationId:operation.operationId});
+    return operation;
+  }
+  async function listHistoryOutbox(workspaceKey=null){
+    const rows=await allRecords('historyOutbox');
+    return rows.filter(row=>!workspaceKey||row.workspaceKey===workspaceKey)
+      .sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt))).map(clone);
+  }
+  async function claimNextHistory(workspaceKey){
+    const createdAt=Date.now();
+    const db=await openDatabase();
+    if(!db){
+      const candidate=Object.values(fallbackState().historyOutbox)
+        .filter(item=>item.workspaceKey===workspaceKey&&item.status==='pending'&&(!item.nextAttemptAt||Date.parse(item.nextAttemptAt)<=createdAt))
+        .sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt)))[0]||null;
+      if(!candidate)return null;
+      const claimed={...candidate,status:'sending',attemptCount:Number(candidate.attemptCount||0)+1,lastAttemptAt:iso(),updatedAt:iso()};
+      fallbackState().historyOutbox[claimed.operationId]=claimed;
+      saveFallback();
+      return clone(claimed);
+    }
+    return idbTransaction(['historyOutbox'],'readwrite',async transaction=>{
+      const store=transaction.objectStore('historyOutbox');
+      const candidates=(await requestResult(store.getAll()))
+        .filter(item=>item.workspaceKey===workspaceKey&&item.status==='pending'&&(!item.nextAttemptAt||Date.parse(item.nextAttemptAt)<=createdAt))
+        .sort((a,b)=>String(a.createdAt).localeCompare(String(b.createdAt)));
+      if(!candidates.length)return null;
+      const claimed={...candidates[0],status:'sending',attemptCount:Number(candidates[0].attemptCount||0)+1,lastAttemptAt:iso(),updatedAt:iso()};
+      await requestResult(store.put(claimed));
+      return claimed;
+    });
+  }
+  async function patchHistoryOperation(operationId,patch){
+    const current=await getRecord('historyOutbox',operationId);
+    if(!current)return null;
+    const next={...current,...clone(patch),updatedAt:iso()};
+    await putRecord('historyOutbox',next);
+    emit('history-outbox-updated',{workspaceKey:next.workspaceKey,operationId,status:next.status});
+    return next;
+  }
+  async function markHistoryFailed(operationId,error,{delayMs=0}={}){
+    return patchHistoryOperation(operationId,{
+      status:'pending',
+      lastError:String(error?.message||error||'unknown error'),
+      nextAttemptAt:new Date(Date.now()+Math.max(0,delayMs)).toISOString(),
+    });
+  }
+  async function markHistoryAcked(operationId,{historyId,createdAt,payloadHash}={}){
+    return patchHistoryOperation(operationId,{
+      status:'acked',
+      historyId:historyId||operationId,
+      committedAt:createdAt||iso(),
+      acknowledgedHash:payloadHash||'',
+      lastError:'',
+      nextAttemptAt:'',
+    });
+  }
+
   async function migrateLegacy(){
     const existing=await readSnapshot();
     if(existing)return {migrated:false,snapshot:existing,reason:'already-initialized'};
@@ -564,6 +663,11 @@
     releaseInterrupted,
     pendingCount,
     supersedeOpen,
+    ensureHistoryOutbox,
+    listHistoryOutbox,
+    claimNextHistory,
+    markHistoryFailed,
+    markHistoryAcked,
     withWriterLock,
     subscribe,
     diagnostics,

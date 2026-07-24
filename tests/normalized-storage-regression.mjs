@@ -21,14 +21,26 @@ assert.match(sql,/v_workspace\.head_revision <> p_expected_revision/,'stale devi
 assert.match(sql,/revision conflict:/,'conflicts need an explicit error');
 assert.match(sql,/unique \(sync_id, operation_id\)/,'commit retries must be idempotent');
 assert.match(sql,/commit rejected: %s study links reference missing concepts/,'dangling study links must block commits');
-assert.match(sql,/create table if not exists public\.ipe_revisions/,'append-only revision history is required');
+assert.match(sql,/create table if not exists public\.ipe_working_snapshots/,'the current server state must be separate from recovery history');
+assert.match(sql,/create table if not exists public\.ipe_commit_receipts/,'working commits need lightweight idempotency receipts');
+assert.match(sql,/create table if not exists public\.ipe_history_snapshots/,'named recovery snapshots require a dedicated store');
+assert.match(sql,/create table if not exists public\.ipe_revisions/,'legacy append-only revision history must remain available during migration');
 assert.doesNotMatch(sql,/delete from public\.ipe_revisions/,'revision history must not be overwritten');
-assert.match(sql,/create or replace function public\.ipe_load_revision/,'a selected historical revision must be readable for recovery');
-assert.match(sql,/grant execute on function public\.ipe_load_revision\(text,text,bigint\)/,'historical revision recovery must be exposed only through its RPC');
+assert.match(sql,/create or replace function public\.ipe_create_history_snapshot/,'named history creation must be independent from working commits');
+assert.match(sql,/create or replace function public\.ipe_load_history/,'a selected named snapshot must be readable for recovery');
+assert.match(sql,/client upgrade required: protocol 3/,'obsolete write clients must be rejected by the server');
 
 assert.match(client,/captured\.snapshot\?\.payloadHash===meta\(\)\.lastPayloadHash&&pendingBefore===0/,'unchanged data without an outbox operation must not create a commit');
 assert.match(client,/p_expected_revision:Number\(operation\.expectedRevision\)/,'durable operations must retain their optimistic concurrency base');
 assert.match(client,/p_operation_id:operation\.operationId/,'commit retries must reuse the durable operation id');
+assert.match(client,/ipe_commit_working_state/,'automatic saves must update the mutable working head');
+assert.match(client,/ipe_create_history_snapshot/,'recovery history must use a separate RPC');
+assert.match(client,/p_protocol_version:CLIENT_PROTOCOL_VERSION/,'writes must identify the guarded client protocol');
+assert.match(client,/startupState==='ready'/,'outbox creation must be gated by the startup head check');
+assert.match(client,/remoteIsNewer&&localIsClean/,'a clean stale device must fast-forward instead of upload');
+assert.match(client,/!current\.lastPayloadHash&&isPristinePayload\(payload\)/,'a fresh empty device may safely receive the server head');
+assert.match(client,/HISTORY_IDLE_MS=2\*60\*1000/,'idle history timing must be explicit');
+assert.match(client,/HISTORY_CONTINUOUS_MS=10\*60\*1000/,'continuous-edit history timing must be explicit');
 assert.match(client,/다른 디바이스가 먼저 저장함/,'client must surface multi-device conflicts');
 assert.match(client,/저장되지 않은 로컬 변경이 있어 원격 적용을 차단함/,'pull must not overwrite dirty local data');
 assert.match(client,/PREPULL_KEY/,'pull must preserve a local pre-apply backup');
@@ -55,7 +67,7 @@ assert.match(client,/빈 Atlas와 학습 연결이 함께 든 백업은 적용�
 assert.match(sql,/empty atlas cannot retain study links/,'the server must reject empty Atlas commits that retain links');
 assert.match(client,/본문 없는 학습 연결/,'client must detect dangling bridge references');
 assert.match(client,/global\.v14TryStartupPull=function\(\)\{\}/,'destructive startup pull must be disabled');
-assert.match(html,/data-sync-action="save">지금 저장/,'the top bar must expose the unified manual save action');
+assert.match(html,/data-sync-action="save">저장/,'the top bar must expose the unified manual save action');
 assert.match(html,/id="localSyncState"/,'the top bar must show local persistence independently');
 assert.match(html,/id="serverSyncState"/,'the top bar must show server persistence independently');
 assert.match(html,/id="syncImportFile"/,'the top bar restore action must use the unified importer');
@@ -67,6 +79,7 @@ assert.doesNotMatch(html,/if\(res\?\.state\)\{latest=res;break;\}/,'manual flush
 
 assert.match(kernel,/createObjectStore\('snapshots'/,'the kernel must persist a canonical snapshot in IndexedDB');
 assert.match(kernel,/createObjectStore\('outbox'/,'the kernel must persist the server outbox in IndexedDB');
+assert.match(kernel,/createObjectStore\('historyOutbox'/,'named history retries must survive refreshes');
 assert.match(kernel,/operation\.status==='pending'.*attemptCount/s,'only never-sent pending operations may be coalesced');
 assert.match(kernel,/status:'sending'/,'claimed outbox operations must become durable in-flight records');
 assert.match(kernel,/navigator\?\.locks\?\.request/,'the kernel must coordinate the server writer through Web Locks when available');

@@ -45,7 +45,7 @@ button,input,select,textarea{font:inherit}button{color:var(--text);background:rg
     <div class="brand"><div class="mark">I</div><div><h1>정처기 Learning OS</h1><p>진도·복습·Concept Atlas를 하나의 학습 흐름으로</p></div></div>
     <div class="top-actions">
       <label class="date-field"><span>운영 날짜</span><input id="activeDate" type="date"></label>
-      <button class="small primary sync-save-button" data-sync-action="save">지금 저장</button>
+      <button class="small primary sync-save-button" data-sync-action="save">저장</button>
       <div class="sync-states" aria-live="polite">
         <span class="sync-state" id="localSyncState" data-tone="busy">로컬 · 확인 중</span>
         <span class="sync-state" id="serverSyncState" data-tone="busy">서버 · 확인 중</span>
@@ -384,6 +384,7 @@ function atlasRuntimePatch(){
       if(window.parent&&window.parent!==window){
         const snapshot=JSON.parse(JSON.stringify(state));
         const bridgeSnapshot=typeof bridgeRead==='function'?JSON.parse(JSON.stringify(bridgeRead())):null;
+        const selectedConcept=ui.selected?.kind==='concept'?state.concepts.find(concept=>concept.id===ui.selected.id):null;
         atlasClientSequence+=1;
         window.parent.postMessage({
           type:'ipe-atlas-saved',
@@ -394,6 +395,7 @@ function atlasRuntimePatch(){
           clientId:atlasClientId,
           clientSequence:atlasClientSequence,
           baseGeneration:parentGeneration,
+          editContext:selectedConcept?{subject:selectedConcept.domain||'',name:selectedConcept.title||'',conceptId:selectedConcept.id}:null,
           at:new Date().toISOString(),
         },'*');
       }
@@ -1279,13 +1281,17 @@ window.addEventListener('message',e=>{
         },'*');
       }catch{}
     });
-    window.IpeNormalizedSync?.acceptAtlasSnapshot(accepted.atlas,accepted.bridge,{reason:'atlas-data-change'});
+    window.IpeNormalizedSync?.acceptAtlasSnapshot(accepted.atlas,accepted.bridge,{reason:'atlas-data-change',editContext:d.editContext});
     const chip=$('#saveChip');if(chip)chip.textContent='Atlas 저장 반영 · 이 브라우저';
   }
 });
 
 let bridgeRefreshRaf=0;window.addEventListener('message',e=>{if(e.data?.type==='ipe-atlas-bridge-updated'){invalidateBridgeCache();if(state.activeTab==='dashboard'&&!bridgeRefreshRaf)bridgeRefreshRaf=requestAnimationFrame(()=>{bridgeRefreshRaf=0;if(state.activeTab==='dashboard')render()})}});
 window.__ipeGetAppState=()=>state;
+window.__ipeGetEditContext=()=>{
+ const item=itemById(state.studyItemId);
+ return {activeTab:state.activeTab,itemId:item?.id||'',subject:item?.subject||'',name:item?.name||''};
+};
 window.IpeNormalizedSync?.install();
 ensureBridge();render();
 </script>

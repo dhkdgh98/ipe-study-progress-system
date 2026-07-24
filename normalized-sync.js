@@ -11,16 +11,26 @@
   const PENDING_IMPORT_KEY='ipe-normalized-pending-import-v2';
   const LEGACY_DIRTY_KEY='ipe-persistence-legacy-dirty-v1';
   const BACKUP_FORMAT='ipe-learning-os-backup';
+  const CLIENT_PROTOCOL_VERSION=3;
+  const HISTORY_IDLE_MS=2*60*1000;
+  const HISTORY_CONTINUOUS_MS=10*60*1000;
   const enc=new TextEncoder();
   const kernel=global.IpePersistenceKernel||null;
   let installed=false;
   let commitTimer=0;
   let retryTimer=0;
+  let historyIdleTimer=0;
+  let historyContinuousTimer=0;
+  let historyRetryTimer=0;
   let inFlight=null;
+  let historyInFlight=null;
   let captureInFlight=Promise.resolve();
   let metaWriteInFlight=Promise.resolve();
   let kernelReady=Promise.resolve(null);
   let importInProgress=false;
+  let startupState='pending';
+  let startupInFlight=null;
+  let recentEditContext=null;
 
   function parse(raw,fallback=null){try{return raw?JSON.parse(raw):fallback}catch{return fallback}}
   function uuid(){return crypto.randomUUID?crypto.randomUUID():'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return(c==='x'?r:(r&3|8)).toString(16)})}
@@ -67,6 +77,9 @@
       lastError:'',
       lastConflict:'',
       restorePending:false,
+      startupChecked:false,
+      lastHistoryHash:'',
+      lastHistoryAt:'',
       scopedWorkspace:workspaceToken(),
       ...saved,
     };
@@ -174,6 +187,11 @@
       orphanedLinks:Array.isArray(payload?.bridge?.orphanedLinks)?payload.bridge.orphanedLinks.length:0,
     };
   }
+  function isPristinePayload(payload){
+    const tally=counts(payload);
+    return tally.progress===0&&tally.notes===0&&tally.concepts===0&&tally.frames===0&&
+      tally.objects===0&&tally.activeLinks===0&&tally.orphanedLinks===0;
+  }
   function legacyMigrationPayload(){
     const base=legacyPayload();
     const pendingRecord=parse(localStorage.getItem(PENDING_IMPORT_KEY),null);
@@ -266,6 +284,7 @@
       writeHash:identity.writeHash,
       expectedRevision:Number(expectedRevision)||0,
       deviceId:meta().deviceId,
+      deviceAlias:String(cfg()?.deviceAlias||'내 기기').trim().slice(0,80)||'내 기기',
     };
   }
   function mirrorPayload(payload){
@@ -299,7 +318,7 @@
     mirrorPayload(payload);
     return result;
   }
-  function captureCurrent(reason,{flush=false,enqueue=enabled()}={}){
+  function captureCurrent(reason,{flush=false,enqueue=enabled()&&startupState==='ready'}={}){
     const task=captureInFlight.then(async()=>{
       setMeta({localState:'saving',lastError:''});
       const payload=await collectPayload({flush});
@@ -351,7 +370,7 @@
     if(!enabled())throw new Error('Supabase 연결 정보가 없음');
     const identity=await ids(c.syncKey);
     try{
-      const rows=await rpc('ipe_load_head',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash});
+      const rows=await rpc('ipe_load_working_head',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash});
       return Array.isArray(rows)?rows[0]||null:rows;
     }catch(error){
       if(/invalid sync key/i.test(error.message))return null;
@@ -361,6 +380,16 @@
 
   function setLocalSaved(message='로컬 저장됨'){
     setMeta({localState:'saved',lastLocalAt:now(),lastLocalMessage:message});
+  }
+  function scheduleNamedHistory(){
+    clearTimeout(historyIdleTimer);
+    historyIdleTimer=setTimeout(()=>saveNamedHistory('idle').catch(()=>{}),HISTORY_IDLE_MS);
+    if(!historyContinuousTimer){
+      historyContinuousTimer=setTimeout(()=>{
+        historyContinuousTimer=0;
+        saveNamedHistory('continuous').catch(()=>{});
+      },HISTORY_CONTINUOUS_MS);
+    }
   }
   function markChanged(reason='data-change',delay=700){
     const current=meta();
@@ -373,12 +402,14 @@
       serverState:enabled()?'queued':'unconfigured',
       lastError:'',
     });
-    captureCurrent(reason,{flush:false,enqueue:enabled()}).catch(()=>{});
+    captureCurrent(reason,{flush:false,enqueue:enabled()&&startupState==='ready'}).catch(()=>{});
+    scheduleNamedHistory();
     clearTimeout(commitTimer);
     if(importInProgress||current.restorePending)return;
     if(enabled())commitTimer=setTimeout(()=>flushNow(reason,{manual:false}).catch(()=>{}),delay);
   }
-  function acceptAtlasSnapshot(atlas,bridge,{reason='atlas-data-change'}={}){
+  function acceptAtlasSnapshot(atlas,bridge,{reason='atlas-data-change',editContext=null}={}){
+    if(editContext?.name)recentEditContext={...editContext,at:Date.now()};
     if(atlas)localStorage.setItem(ATLAS_KEY,JSON.stringify(atlas));
     if(bridge)localStorage.setItem(BRIDGE_KEY,JSON.stringify(bridge));
     const current=meta();
@@ -397,11 +428,12 @@
       bridge:bridge||emptyBridge(),
     };
     const task=captureInFlight.then(async()=>{
-      const result=await persistPayload(payload,{reason,enqueue:enabled(),source:'atlas-parent-commit'});
+      const result=await persistPayload(payload,{reason,enqueue:enabled()&&startupState==='ready',source:'atlas-parent-commit'});
       setMeta({localState:'saved',lastLocalAt:now(),localGeneration:Number(result.snapshot?.generation)||0});
       return result;
     });
     captureInFlight=task.catch(error=>setMeta({localState:'failed',lastError:error.message}));
+    scheduleNamedHistory();
     clearTimeout(commitTimer);
     if(!importInProgress&&!current.restorePending&&enabled()){
       commitTimer=setTimeout(()=>flushNow(reason,{manual:false}).catch(()=>{}),500);
@@ -418,7 +450,7 @@
   async function commitOperation(operation,{verify=true}={}){
     let result;
     try{
-      result=await rpc('ipe_commit_state',{
+      result=await rpc('ipe_commit_working_state',{
         p_sync_id:operation.syncId,
         p_write_hash:operation.writeHash,
         p_expected_revision:Number(operation.expectedRevision)||0,
@@ -428,6 +460,7 @@
         p_app:operation.payload.app,
         p_atlas:operation.payload.atlas,
         p_bridge:operation.payload.bridge,
+        p_protocol_version:CLIENT_PROTOCOL_VERSION,
       });
     }catch(error){
       if(/revision conflict|40001/i.test(error.message+' '+error.detail)){
@@ -447,7 +480,7 @@
     if(verify){
       const remote=await head();
       if(!remote||Number(remote.revision)!==savedRevision||remote.payload_hash!==operation.payloadHash){
-        const error=new Error('저장 후 서버 revision/hash 검증 실패');
+        const error=new Error('저장 후 서버 버전/hash 검증 실패');
         await kernel.markFailed(operation.operationId,error,{delayMs:1500});
         setMeta({dirty:true,serverState:'failed',lastError:error.message});
         retryLater('verify-retry',1500);
@@ -478,7 +511,134 @@
     });
     return {row,payloadHash:operation.payloadHash,revision:savedRevision,operationId:operation.operationId,replayed:!!row?.replayed};
   }
+  function editContext(){
+    const provided=global.__ipeGetEditContext?.()||{};
+    const app=global.__ipeGetAppState?.()||{};
+    const recent=recentEditContext&&Date.now()-recentEditContext.at<30*60*1000?recentEditContext:{};
+    return {
+      subject:String(recent.subject||provided.subject||'').trim(),
+      name:String(recent.name||provided.name||'').trim(),
+      itemId:String(provided.itemId||app.studyItemId||'').trim(),
+      activeTab:String(provided.activeTab||app.activeTab||'').trim(),
+      conceptId:String(recent.conceptId||'').trim(),
+    };
+  }
+  function historyStamp(date=new Date()){
+    const pad=value=>String(value).padStart(2,'0');
+    return `${pad(date.getMonth()+1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
+  function historyLabel(context=editContext(),date=new Date()){
+    const device=String(cfg()?.deviceAlias||'내 기기').trim()||'내 기기';
+    const scope=context.subject&&context.name
+      ?`${context.subject} › ${context.name}`
+      :(context.name||context.subject||'전체 학습 상태');
+    return `${scope} · ${device} · ${historyStamp(date)}`;
+  }
+  async function commitHistoryOperation(operation){
+    try{
+      const result=await rpc('ipe_create_history_snapshot',{
+        p_sync_id:operation.syncId,
+        p_write_hash:operation.writeHash,
+        p_expected_revision:Number(operation.expectedRevision)||0,
+        p_operation_id:operation.operationId,
+        p_device_id:operation.deviceId,
+        p_device_alias:operation.deviceAlias,
+        p_payload_hash:operation.payloadHash,
+        p_label:operation.label,
+        p_reason:operation.reason,
+        p_context:operation.context||{},
+        p_app:operation.payload.app,
+        p_atlas:operation.payload.atlas,
+        p_bridge:operation.payload.bridge,
+        p_protocol_version:CLIENT_PROTOCOL_VERSION,
+      });
+      const row=Array.isArray(result)?result[0]:result;
+      await kernel.markHistoryAcked(operation.operationId,{
+        historyId:row?.history_id,
+        createdAt:row?.created_at,
+        payloadHash:operation.payloadHash,
+      });
+      setMeta({
+        lastHistoryHash:operation.payloadHash,
+        lastHistoryAt:row?.created_at||now(),
+        lastHistoryLabel:operation.label,
+        lastError:'',
+      });
+      return row;
+    }catch(error){
+      const delay=Math.min(60000,1500*(2**Math.max(0,Number(operation.attemptCount||1)-1)));
+      await kernel.markHistoryFailed(operation.operationId,error,{delayMs:delay});
+      setMeta({lastError:'복구 기록 저장 실패: '+error.message});
+      clearTimeout(historyRetryTimer);
+      historyRetryTimer=setTimeout(()=>drainHistory({workspaceKey:operation.workspaceKey}).catch(()=>{}),delay);
+      throw error;
+    }
+  }
+  async function drainHistory(remote){
+    const locked=await kernel.withWriterLock(remote.workspaceKey,async()=>{
+      let latest=null;
+      while(true){
+        const operation=await kernel.claimNextHistory(remote.workspaceKey);
+        if(!operation)break;
+        latest=await commitHistoryOperation(operation);
+      }
+      return latest;
+    });
+    return locked.acquired?locked.value:{deferred:true};
+  }
+  async function saveNamedHistory(trigger='manual',{skipFlush=false}={}){
+    if(historyInFlight)return historyInFlight;
+    const task=(async()=>{
+      clearTimeout(historyIdleTimer);
+      clearTimeout(historyContinuousTimer);
+      historyIdleTimer=0;
+      historyContinuousTimer=0;
+      if(!enabled()||!kernel)return {localOnly:true};
+      if(!skipFlush)await flushNow(`history-${trigger}`,{manual:false});
+      if(meta().serverState!=='saved')return {deferred:true};
+      const snapshot=await kernel.readSnapshot();
+      if(!snapshot||snapshot.payloadHash===meta().lastHistoryHash)return {skipped:true};
+      const context=editContext();
+      const remote=await remoteDescriptor();
+      await kernel.ensureHistoryOutbox(remote,{
+        reason:trigger,
+        label:historyLabel(context),
+        context,
+      });
+      return drainHistory(remote);
+    })();
+    historyInFlight=task;
+    try{return await task}
+    finally{if(historyInFlight===task)historyInFlight=null}
+  }
+  async function protectRemoteBeforeOverwrite(reason){
+    if(!enabled())return null;
+    const remote=await head();
+    if(!remote||remote.payload_hash===meta().lastProtectedRemoteHash)return null;
+    const identity=await ids(cfg().syncKey);
+    const context={scope:'server-head',reason};
+    const label=`서버 덮어쓰기 전 · ${String(cfg()?.deviceAlias||'내 기기').trim()||'내 기기'} · ${historyStamp()}`;
+    const rows=await rpc('ipe_create_history_snapshot',{
+      p_sync_id:identity.syncId,
+      p_write_hash:identity.writeHash,
+      p_expected_revision:Number(remote.revision)||0,
+      p_operation_id:uuid(),
+      p_device_id:meta().deviceId,
+      p_device_alias:String(cfg()?.deviceAlias||'내 기기').trim()||'내 기기',
+      p_payload_hash:remote.payload_hash,
+      p_label:label,
+      p_reason:reason,
+      p_context:context,
+      p_app:remote.app_state,
+      p_atlas:remote.atlas_state,
+      p_bridge:remote.bridge_state,
+      p_protocol_version:CLIENT_PROTOCOL_VERSION,
+    });
+    setMeta({lastProtectedRemoteHash:remote.payload_hash});
+    return Array.isArray(rows)?rows[0]:rows;
+  }
   async function commitOnce(reason,{verify=true}={}){
+    if(enabled()&&startupState!=='ready')await ensureStartupReady();
     const start=meta();
     setMeta({serverState:enabled()?'saving':'unconfigured',lastError:''});
     let captured;
@@ -495,13 +655,15 @@
     }
     if(start.serverState==='conflict'){
       setMeta({dirty:true,serverState:'conflict'});
-      throw new Error('서버 충돌을 먼저 해결해야 함 · 서버 revision 적용 또는 로컬을 새 revision으로 저장을 선택해.');
+      throw new Error('서버 충돌을 먼저 해결해야 함 · 서버 최신 데이터 적용 또는 로컬 데이터로 서버 갱신을 선택해.');
     }
     if(!enabled()){
       setMeta({dirty:true,localState:'saved',serverState:'unconfigured',lastError:''});
       return {localOnly:true,audit:captured.audit,payloadHash:captured.snapshot?.payloadHash};
     }
     if(!kernel)throw new Error('영속 저장 커널이 로드되지 않음');
+    if(start.restorePending)await protectRemoteBeforeOverwrite('restore-overwrite');
+    else if(/초기화|reset/i.test(`${reason} ${start.lastReason||''}`))await protectRemoteBeforeOverwrite('data-reset');
     const remote=await remoteDescriptor();
     const pendingBefore=await kernel.pendingCount(remote.workspaceKey);
     if(captured.snapshot?.payloadHash===meta().lastPayloadHash&&pendingBefore===0){
@@ -565,7 +727,7 @@
     const blob=new Blob([JSON.stringify(envelope,null,2)],{type:'application/json'});
     const anchor=document.createElement('a');
     anchor.href=URL.createObjectURL(blob);
-    anchor.download=`IPE_LearningOS_backup_r${envelope.revision}_${createdAt.slice(0,10)}.json`;
+    anchor.download=`IPE_LearningOS_backup_${createdAt.slice(0,10)}_${createdAt.slice(11,16).replace(':','')}.json`;
     anchor.click();
     URL.revokeObjectURL(anchor.href);
     setMeta({localState:'saved',lastLocalAt:createdAt,lastBackupAt:createdAt,lastBackupHash:payloadHash});
@@ -658,7 +820,7 @@
         lastReason:'backup-restore',
         lastError:'',
       });
-      global.showToast?.('백업을 로컬에 적용했어. 확인 후 지금 저장을 눌러 서버에 새 revision으로 저장해.');
+      global.showToast?.('백업을 로컬에 적용했어. 확인 후 저장을 눌러 서버에 반영해.');
       return {audit:appliedAudit,removedDangling:archived.removed,before,after};
     }finally{
       importInProgress=false;
@@ -673,12 +835,20 @@
   }
   async function importAtlasFile(file){return importFile(file)}
 
-  async function pull(){
-    const remote=await head();
-    if(!remote)throw new Error('정규화 저장소에 원격 revision이 없음');
+  function localChangedDuringStartup(){
+    const error=new Error('서버 최신본 적용 중 로컬 변경이 감지되어 자동 적용을 중단함');
+    error.code='LOCAL_CHANGED_DURING_STARTUP';
+    return error;
+  }
+  async function pull({automatic=false,remote:providedRemote=null,expectedGeneration=null}={}){
+    const remote=providedRemote||await head();
+    if(!remote)throw new Error('서버에 저장된 데이터가 없음');
     const currentMeta=meta();
     if(currentMeta.dirty&&currentMeta.serverState!=='conflict')throw new Error('저장되지 않은 로컬 변경이 있어 원격 적용을 차단함');
+    const guardedGeneration=expectedGeneration===null?Number(currentMeta.generation||0):Number(expectedGeneration);
+    if(automatic&&Number(currentMeta.generation||0)!==guardedGeneration)throw localChangedDuringStartup();
     const currentCapture=await captureCurrent('pre-pull-checkpoint',{flush:true,enqueue:false});
+    if(automatic&&(meta().dirty||Number(meta().generation||0)!==guardedGeneration))throw localChangedDuringStartup();
     const current=currentCapture.payload;
     const localApp=global.__ipeGetAppState?.()||{};
     const candidate={
@@ -689,12 +859,18 @@
     };
     const audit=validate(candidate);
     if(!audit.ok)throw new Error('원격 데이터 무결성 오류: '+audit.errors.join(' / '));
-    if(!confirm(`원격 revision ${remote.revision}을 적용할까?\n현재 로컬 데이터는 적용 전에 보존된다.`))return {cancelled:true};
+    if(!automatic&&!confirm(`서버의 최신 데이터를 적용할까?\n현재 로컬 데이터는 적용 전에 보존된다.`))return {cancelled:true};
     localStorage.setItem(PREPULL_KEY,JSON.stringify({savedAt:now(),payload:current}));
     await ensureKernel();
     await kernel?.checkpoint(current,{source:'pre-pull',metadata:{remoteRevision:Number(remote.revision)||0}});
     const canonical={version:2,app:appData(candidate.app),atlas:candidate.atlas,bridge:candidate.bridge};
     await persistPayload(canonical,{reason:'remote-pull',enqueue:false,source:'remote-revision'});
+    if(automatic&&(meta().dirty||Number(meta().generation||0)!==guardedGeneration)){
+      const live=await collectPayload({flush:true});
+      await persistPayload(live,{reason:'startup-race-recovery',enqueue:false,source:'startup-race-recovery'});
+      setMeta({dirty:true,serverState:'conflict',lastConflict:'서버 최신본 적용 중 로컬 변경 감지'});
+      throw localChangedDuringStartup();
+    }
     global.applySnapshotPayload(candidate);
     if(kernel){
       const identity=await ids(cfg().syncKey);
@@ -719,7 +895,7 @@
     if(!enabled())throw new Error('Supabase 연결 정보가 없음');
     if(meta().serverState!=='conflict')throw new Error('해결할 서버 충돌이 없음');
     const remote=await head();
-    if(!remote)throw new Error('서버 최신 revision을 확인할 수 없음');
+    if(!remote)throw new Error('서버 최신 데이터를 확인할 수 없음');
     const captured=await captureCurrent('conflict-local-checkpoint',{flush:true,enqueue:false});
     if(captured.snapshot?.payloadHash===remote.payload_hash){
       setMeta({
@@ -733,11 +909,12 @@
       return {skipped:true,revision:Number(remote.revision)||0};
     }
     const approved=confirm(
-      `서버 revision ${remote.revision}보다 로컬 데이터가 다르다.\n\n`+
-      `현재 로컬 데이터를 우선하여 서버에 revision ${Number(remote.revision)+1}로 저장할까?\n`+
-      `서버의 현재 revision은 이력에 그대로 보존된다.`
+      `서버 최신 데이터와 현재 로컬 데이터가 다르다.\n\n`+
+      `현재 로컬 데이터를 우선하여 서버를 갱신할까?\n`+
+      `덮어쓰기 전 서버 상태는 이름 있는 복구 기록으로 보존된다.`
     );
     if(!approved)return {cancelled:true};
+    await protectRemoteBeforeOverwrite('conflict-keep-local');
     await ensureKernel();
     await kernel.checkpoint(captured.payload,{
       source:'conflict-keep-local',
@@ -759,44 +936,56 @@
   }
   async function history(limit=30){
     const c=cfg(),identity=await ids(c.syncKey);
-    return rpc('ipe_list_revisions',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash,p_limit:limit});
+    return rpc('ipe_list_history',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash,p_limit:limit});
   }
-  async function loadRevision(revision){
+  async function loadHistory(historyId){
     const c=cfg(),identity=await ids(c.syncKey);
-    const rows=await rpc('ipe_load_revision',{
+    const rows=await rpc('ipe_load_history',{
       p_sync_id:identity.syncId,
       p_write_hash:identity.writeHash,
-      p_revision:Number(revision),
+      p_history_id:historyId,
     });
     const row=Array.isArray(rows)?rows[0]||null:rows;
-    if(!row)throw new Error(`서버 revision ${revision}을 찾을 수 없음`);
+    if(!row)throw new Error('선택한 복구 기록을 찾을 수 없음');
     const candidate={version:2,app:row.app_state,atlas:row.atlas_state,bridge:row.bridge_state};
-    const result=await applyCandidate(candidate,{source:`server-revision-${revision}`});
-    return {...result,revision:Number(revision)};
+    const result=await applyCandidate(candidate,{source:`server-history-${historyId}`});
+    return {...result,historyId};
+  }
+  async function ensureStartupReady(){
+    if(startupState==='ready')return;
+    await startupCheck();
+    if(startupState!=='ready')throw new Error('서버 최신 상태를 확인하기 전에는 업로드할 수 없음');
   }
   async function startupCheck(){
-    await ensureKernel();
-    updateStatusUI(meta());
-    if(!enabled()){
-      setMeta({serverState:'unconfigured'});
-      return;
-    }
-    if(meta().restorePending){
-      setMeta({serverState:'restore-pending'});
-      return;
-    }
-    try{
+    if(startupInFlight)return startupInFlight;
+    startupState='checking';
+    setMeta({serverState:enabled()?'checking':'unconfigured',startupChecked:false,lastError:''});
+    const task=(async()=>{
+      await ensureKernel();
+      if(!enabled()){
+        startupState='ready';
+        setMeta({serverState:'unconfigured',startupChecked:true});
+        return {unconfigured:true};
+      }
+      if(meta().restorePending){
+        startupState='ready';
+        setMeta({serverState:'restore-pending',startupChecked:true});
+        return {restorePending:true};
+      }
       const remote=await head();
       if(!remote){
-        setMeta({dirty:true,serverState:'queued',lastError:''});
-        commitTimer=setTimeout(()=>flushNow('startup-bootstrap',{manual:false}).catch(()=>{}),700);
-        return;
+        startupState='ready';
+        setMeta({dirty:true,serverState:'queued',startupChecked:true,lastError:''});
+        if(!inFlight)commitTimer=setTimeout(()=>flushNow('startup-bootstrap',{manual:false}).catch(()=>{}),700);
+        return {empty:true};
       }
       const payload=localPayload();
       const localHash=await sha256(stable(payload));
+      const current=meta();
+      const identity=await ids(cfg().syncKey);
+      const pending=kernel?await kernel.pendingCount(identity.syncId):0;
       if(localHash===remote.payload_hash){
         if(kernel){
-          const identity=await ids(cfg().syncKey);
           const rows=await kernel.listOutbox(identity.syncId);
           for(const operation of rows){
             if(['pending','sending'].includes(operation.status)&&operation.payloadHash===remote.payload_hash){
@@ -808,22 +997,64 @@
             }
           }
         }
+        startupState='ready';
         setMeta({
           serverRevision:Number(remote.revision)||0,
           lastPayloadHash:remote.payload_hash,
           dirty:false,
           serverState:'saved',
-          lastCommitAt:remote.created_at||meta().lastCommitAt,
+          startupChecked:true,
+          lastCommitAt:remote.created_at||current.lastCommitAt,
           lastError:'',
         });
-      }else if(Number(meta().serverRevision)===Number(remote.revision)&&meta().dirty){
-        setMeta({serverState:'queued'});
-        commitTimer=setTimeout(()=>flushNow('startup-pending',{manual:false}).catch(()=>{}),900);
-      }else{
-        setMeta({serverState:'conflict',lastConflict:'로컬과 서버 데이터가 다름 · 자동 덮어쓰기 중단'});
+        return {matched:true};
       }
-    }catch(error){
-      setMeta({serverState:navigator.onLine===false?'offline':'failed',lastError:error.message});
+      const remoteIsNewer=Number(remote.revision)>Number(current.serverRevision);
+      const localIsClean=!current.dirty&&pending===0&&(
+        (!!current.lastPayloadHash&&localHash===current.lastPayloadHash)||
+        (!current.lastPayloadHash&&isPristinePayload(payload))
+      );
+      if(remoteIsNewer&&localIsClean){
+        setMeta({serverState:'applying',lastError:''});
+        try{
+          await pull({automatic:true,remote,expectedGeneration:Number(current.generation||0)});
+        }catch(error){
+          if(error.code!=='LOCAL_CHANGED_DURING_STARTUP')throw error;
+          startupState='ready';
+          setMeta({
+            dirty:true,
+            serverState:'conflict',
+            startupChecked:true,
+            lastConflict:'서버 최신본 적용 중 로컬 변경 감지 · 자동 적용 중단',
+          });
+          return {conflict:true,reason:'local-changed-during-startup'};
+        }
+        startupState='ready';
+        setMeta({startupChecked:true,serverState:'saved'});
+        return {fastForwarded:true};
+      }
+      if(Number(current.serverRevision)===Number(remote.revision)&&(current.dirty||pending>0)){
+        startupState='ready';
+        setMeta({serverState:'queued',startupChecked:true});
+        commitTimer=setTimeout(()=>flushNow('startup-pending',{manual:false}).catch(()=>{}),900);
+        return {queued:true};
+      }
+      startupState='ready';
+      setMeta({
+        serverState:'conflict',
+        startupChecked:true,
+        lastConflict:'서버 최신 데이터와 이 기기의 변경이 겹침 · 자동 업로드 중단',
+      });
+      return {conflict:true};
+    })();
+    startupInFlight=task;
+    try{return await task}
+    catch(error){
+      startupState='blocked';
+      setMeta({serverState:navigator.onLine===false?'offline':'failed',startupChecked:false,lastError:error.message});
+      throw error;
+    }finally{
+      if(startupInFlight===task)startupInFlight=null;
     }
   }
 
@@ -833,13 +1064,14 @@
     return {text:'로컬 · 저장됨',tone:'ok'};
   }
   function serverStatus(value){
-    const revision=Number(value.serverRevision)||0;
     const map={
       unconfigured:['서버 · 연결 안 됨','warn'],
       empty:['서버 · 첫 저장 대기','warn'],
+      checking:['서버 · 최신 상태 확인 중','busy'],
+      applying:['서버 · 최신 데이터 적용 중','busy'],
       queued:['서버 · 저장 대기','warn'],
       saving:['서버 · 저장 중','busy'],
-      saved:[`서버 · r${revision} 저장됨`,'ok'],
+      saved:['서버 · 저장됨','ok'],
       offline:['서버 · 오프라인','warn'],
       conflict:['서버 · 충돌 확인 필요','error'],
       blocked:['서버 · 무결성 차단','error'],
@@ -871,14 +1103,15 @@
   function panel(){
     const c=cfg()||{};
     const m=meta();
-    return `<section class="panel"><div class="panel-head"><div><div class="panel-title">저장·백업·복구</div><div class="panel-note">App·Atlas·Bridge를 하나의 데이터 흐름으로 로컬 저장하고 Supabase revision에 자동 커밋한다.</div></div><span class="chip">revision ${Number(m.serverRevision)||0}</span></div><div class="panel-body">`+
+    return `<section class="panel"><div class="panel-head"><div><div class="panel-title">저장·기록·복구</div><div class="panel-note">App·Atlas·Bridge 전체를 로컬과 서버에 저장하고, 의미 있는 시점만 이름 있는 복구 기록으로 남긴다.</div></div></div><div class="panel-body">`+
       `<div class="cloud-status" id="v2SyncStatus">${statusHtml(m)}</div>`+
-      `<div class="cloud-actions"><button class="primary" data-sync-action="save">지금 저장</button><button data-sync-action="backup">통합 백업 다운로드</button><button data-sync-action="pick-import">백업 가져오기</button><button data-sync-action="pull">서버 최신 revision 적용</button>${m.serverState==='conflict'?'<button data-sync-action="keep-local">로컬을 새 revision으로 저장</button>':''}<button data-sync-action="history">revision 이력</button><button data-sync-action="audit">무결성 점검</button></div>`+
+      `<div class="cloud-actions"><button class="primary" data-sync-action="save">저장</button><button data-sync-action="backup">통합 백업 다운로드</button><button data-sync-action="pick-import">백업 가져오기</button><button data-sync-action="pull">서버 최신 데이터 적용</button>${m.serverState==='conflict'?'<button data-sync-action="keep-local">로컬 데이터로 서버 갱신</button>':''}<button data-sync-action="history">복구 기록</button><button data-sync-action="audit">무결성 점검</button></div>`+
       `<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--soft);font-weight:800">Supabase 연결·고급 설정</summary><div class="cloud-grid" style="margin-top:12px">`+
       `<div class="setting"><label>Supabase Project URL</label><input id="sbUrl" value="${escapeHtml(c.url||'')}" placeholder="https://xxxxx.supabase.co"></div>`+
       `<div class="setting"><label>Publishable / Anon Key</label><input id="sbAnonKey" type="password" value="${escapeHtml(c.anonKey||'')}"></div>`+
+      `<div class="setting"><label>기기 이름</label><input id="sbDeviceAlias" value="${escapeHtml(c.deviceAlias||'')}" placeholder="예: 데스크탑, 맥북"><div class="help">복구 기록 이름에만 사용하며 실제 컴퓨터 이름은 수집하지 않는다.</div></div>`+
       `<div class="setting cloud-wide"><label>동기화 키</label><input id="sbSyncKey" type="password" value="${escapeHtml(c.syncKey||'')}"><div class="help">연결 정보는 이 브라우저에만 저장되며 백업·서버 payload에는 포함되지 않는다.</div></div>`+
-      `</div><div class="cloud-actions"><button data-sync-action="save-config">연결 정보 저장·확인</button><button data-sync-action="copy-sql">v2 SQL 복사</button></div></details>`+
+      `</div><div class="cloud-actions"><button data-sync-action="save-config">연결 정보 저장·확인</button><button data-sync-action="copy-sql">저장소 SQL 복사</button></div></details>`+
       `</div></section>`;
   }
   function stripLegacySettings(html){
@@ -893,9 +1126,10 @@
   async function handleAction(action,button=null){
     if(action==='save'){
       const result=await flushNow('manual',{manual:true});
+      if(!result.localOnly&&!result.deferred)await saveNamedHistory('manual',{skipFlush:true});
       if(result.localOnly)global.showToast?.('로컬 저장 완료 · 서버 연결 정보를 설정하면 자동 동기화돼.');
       else if(result.deferred)global.showToast?.('로컬 저장 완료 · 다른 탭의 서버 저장이 끝나면 이어서 동기화돼.');
-      else global.showToast?.(result.skipped?'최신 데이터가 이미 서버에 저장되어 있어.':`서버 revision ${result.revision||result.row?.revision} 저장·검증 완료`);
+      else global.showToast?.(result.skipped?'로컬·서버가 이미 최신 상태야.':'로컬·서버 저장과 복구 기록 생성 완료');
     }
     if(action==='backup')await createBackup();
     if(action==='pick-import')document.getElementById('syncImportFile')?.click();
@@ -906,11 +1140,11 @@
       const status=document.getElementById('v2SyncStatus');
       if(status)status.innerHTML=(rows||[]).map(row=>
         `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin:6px 0">`+
-        `<span>r${row.revision} · 개념 ${row.concept_count} · 연결 ${row.bridge_link_count} · ${escapeHtml(row.created_at)}</span>`+
-        `<button class="small" data-sync-action="restore-revision" data-revision="${row.revision}">이 revision 복구</button></div>`
-      ).join('')||'revision 없음';
+        `<span>${escapeHtml(row.label)} · 개념 ${row.concept_count} · 연결 ${row.bridge_link_count}</span>`+
+        `<button class="small" data-sync-action="restore-history" data-history-id="${escapeHtml(row.history_id)}">이 기록 복구</button></div>`
+      ).join('')||'복구 기록 없음';
     }
-    if(action==='restore-revision')await loadRevision(button?.dataset.revision);
+    if(action==='restore-history')await loadHistory(button?.dataset.historyId);
     if(action==='audit'){
       const payload=await collectPayload({flush:true});
       const audit=validate(payload);
@@ -924,17 +1158,19 @@
       c.url=(document.getElementById('sbUrl')?.value||'').trim().replace(/\/+$/,'');
       c.anonKey=(document.getElementById('sbAnonKey')?.value||'').trim();
       c.syncKey=(document.getElementById('sbSyncKey')?.value||'').trim();
+      c.deviceAlias=(document.getElementById('sbDeviceAlias')?.value||'').trim().slice(0,80);
       c.auto=false;
       c.autoPull=false;
       localStorage.setItem(APP_KEY,JSON.stringify(global.__ipeGetAppState?.()||{}));
-      setMeta({serverState:enabled()?'queued':'unconfigured',lastError:''});
+      startupState='pending';
+      setMeta({serverState:enabled()?'checking':'unconfigured',startupChecked:false,lastError:''});
       await startupCheck();
       global.showToast?.('연결 정보를 이 브라우저에 저장하고 서버 상태를 확인했어.');
     }
     if(action==='copy-sql'){
       const sql=await (await fetch('supabase-normalized-v2.sql')).text();
       await navigator.clipboard.writeText(sql);
-      global.showToast?.('정규화 저장소 v2 SQL을 복사했어.');
+      global.showToast?.('최신 저장소 SQL을 복사했어.');
     }
   }
   function install(){
@@ -957,7 +1193,7 @@
     const baseSave=global.save;
     global.save=function(message){
       const result=baseSave(message);
-      markChanged('app-data-change',700);
+      markChanged(`app-data-change:${message||'change'}`,700);
       return result;
     };
 
@@ -989,8 +1225,8 @@
       finally{event.target.value=''}
     },true);
     window.addEventListener('online',()=>{
-      if(meta().dirty&&!meta().restorePending)flushNow('online-retry',{manual:false}).catch(()=>{});
-      else startupCheck();
+      startupState='pending';
+      startupCheck().catch(()=>{});
     });
     window.addEventListener('offline',()=>setMeta({serverState:meta().dirty?'offline':meta().serverState}));
     window.addEventListener('keydown',event=>{
@@ -1007,7 +1243,7 @@
       if(event.type==='server-acked')startupCheck().catch(()=>{});
     });
     updateStatusUI(meta());
-    setTimeout(()=>startupCheck(),250);
+    setTimeout(()=>startupCheck().catch(()=>{}),250);
   }
 
   global.IpeNormalizedSync={
@@ -1016,7 +1252,8 @@
     commit:flushNow,
     pull,
     history,
-    loadRevision,
+    loadHistory,
+    saveNamedHistory,
     resolveConflictKeepLocal,
     schedule:markChanged,
     validate,

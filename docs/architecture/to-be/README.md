@@ -16,12 +16,13 @@ App·Atlas·Bridge의 저장 권위를 부모 브라우저의 Persistence Kernel
 
 1. 서버 payload는 항상 App·Atlas·Bridge 통합 스냅샷 하나다.
 2. 로컬 저장 완료는 IndexedDB transaction과 read-back hash 검증 뒤에만 표시한다.
-3. 전송을 시작한 operation의 `operationId`, payload hash, expected revision은 재시도에서 바뀌지 않는다.
+3. 전송을 시작한 작업 operation의 `operationId`, payload hash, expected server version은 재시도에서 바뀌지 않는다.
 4. 한 workspace의 서버 writer는 Web Lock 또는 갱신 lease 하나다.
 5. Atlas iframe 저장은 부모 generation ACK를 받아야 canonical이 된다.
 6. backup restore와 remote pull은 기존 canonical checkpoint를 만든 뒤 새 canonical을 기록한다.
-7. 서버 충돌은 자동 overwrite하지 않으며 사용자가 server 또는 local 중 하나를 명시적으로 선택한다.
+7. 시작 head 검사 전에는 서버 전송을 만들지 않는다. 로컬이 깨끗하면 최신 서버 head를 자동 적용하고, 로컬 변경이나 outbox가 있으면 충돌로 차단한다.
 8. legacy localStorage 키는 migration 검증 후에도 자동 삭제하지 않는다.
+9. 현재 작업본, 재시도 영수증, 이름 있는 복구 기록은 각각 별도 테이블과 별도 outbox 수명을 가진다.
 
 ## 호환 계층의 수명
 
@@ -32,6 +33,6 @@ App·Atlas·Bridge의 저장 권위를 부모 브라우저의 Persistence Kernel
 ## 남은 구조 제약
 
 - 서버 projection은 commit마다 전체 삭제·재삽입하므로 데이터가 커지면 RPC 시간이 증가한다.
-- revision은 전체 JSON append-only라 자동저장 빈도에 비례해 저장량이 증가한다.
+- 이름 있는 복구 기록도 전체 JSON이므로 기록 보존 기간이 길어지면 저장량이 증가한다. 다만 일반 자동저장은 복구 기록을 만들지 않는다.
 - 서로 다른 기기의 동시 변경은 자동 merge하지 않는다. CAS 충돌 후 사용자 선택으로 해결한다.
 - Atlas iframe은 동일 사용자가 동시에 두 화면을 편집하는 mutation merge를 제공하지 않는다. 부모 generation이 stale snapshot overwrite는 차단하지만 stale 편집 자체는 최신 canonical로 되돌린다.

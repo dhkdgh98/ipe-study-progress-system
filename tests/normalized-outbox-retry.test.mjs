@@ -22,7 +22,7 @@ const commitBodies=[];
 let remote=null;
 async function fetchMock(url,options={}){
   const name=String(url).split('/').pop();
-  if(name==='ipe_commit_state'){
+  if(name==='ipe_commit_working_state'){
     const body=JSON.parse(options.body);
     commitBodies.push(body);
     if(!remote){
@@ -40,7 +40,7 @@ async function fetchMock(url,options={}){
     assert.equal(body.p_operation_id,remote.operation_id,'the server only accepts this as an idempotent replay');
     return {ok:true,status:200,text:async()=>JSON.stringify([{revision:1,committed_at:remote.created_at,replayed:true}])};
   }
-  if(name==='ipe_load_head'){
+  if(name==='ipe_load_working_head'){
     return {ok:true,status:200,text:async()=>JSON.stringify([remote])};
   }
   throw new Error('unexpected RPC '+name);

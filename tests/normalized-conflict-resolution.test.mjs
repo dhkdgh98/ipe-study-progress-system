@@ -30,8 +30,12 @@ let remote={
 let commitCalls=0;
 async function fetchMock(url,options={}){
   const name=String(url).split('/').pop();
-  if(name==='ipe_load_head')return {ok:true,status:200,text:async()=>JSON.stringify([remote])};
-  if(name==='ipe_commit_state'){
+  if(name==='ipe_load_working_head')return {ok:true,status:200,text:async()=>JSON.stringify([remote])};
+  if(name==='ipe_create_history_snapshot'){
+    const body=JSON.parse(options.body);
+    return {ok:true,status:200,text:async()=>JSON.stringify([{history_id:body.p_operation_id,created_at:new Date().toISOString(),replayed:false}])};
+  }
+  if(name==='ipe_commit_working_state'){
     commitCalls+=1;
     const body=JSON.parse(options.body);
     if(Number(body.p_expected_revision)!==remote.revision){
@@ -91,12 +95,12 @@ const context={
 vm.runInNewContext(kernelSource,context);
 vm.runInNewContext(syncSource,context);
 
-await assert.rejects(window.IpeNormalizedSync.flushNow('stale-write'),/다른 디바이스가 먼저 저장함/);
+await assert.rejects(window.IpeNormalizedSync.flushNow('stale-write'),/서버 충돌을 먼저 해결해야 함/);
 assert.equal(window.IpeNormalizedSync.meta().serverState,'conflict');
-assert.equal(commitCalls,1);
+assert.equal(commitCalls,0,'the startup barrier must reject a stale upload before the commit RPC');
 
 await assert.rejects(window.IpeNormalizedSync.flushNow('manual-during-conflict'),/서버 충돌을 먼저 해결해야 함/);
-assert.equal(commitCalls,1,'ordinary manual save must not accumulate another stale conflict operation');
+assert.equal(commitCalls,0,'ordinary manual save must not create a stale conflict operation');
 
 const resolved=await window.IpeNormalizedSync.resolveConflictKeepLocal();
 assert.equal(resolved.revision,2);
@@ -104,7 +108,6 @@ assert.equal(remote.app_state.notes['001'],'keep-local');
 assert.equal(window.IpeNormalizedSync.meta().serverState,'saved');
 assert.equal(window.IpeNormalizedSync.meta().dirty,false);
 const rows=await window.IpePersistenceKernel.listOutbox();
-assert.ok(rows.some(row=>row.status==='superseded'),'the rejected stale operation must remain auditable but inactive');
 assert.ok(rows.some(row=>row.status==='acked'&&row.revision===2),'the explicitly rebased local operation must be acknowledged');
 
 console.log('normalized conflict resolution: ok');
