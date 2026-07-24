@@ -77,4 +77,10 @@ const lock=await kernel.withWriterLock(remote.workspaceKey,async()=>42);
 assert.equal(lock.acquired,true);
 assert.equal(lock.value,42);
 
+const cleared=await kernel.clearAllData();
+assert.equal(cleared.cleared,true);
+assert.equal(await kernel.readSnapshot(),null,'forced replacement must remove the prior canonical snapshot');
+assert.equal((await kernel.listOutbox()).length,0,'forced replacement must discard every pending working operation');
+assert.equal((await kernel.listCheckpoints()).length,0,'forced replacement must discard local checkpoints');
+
 console.log('persistence kernel: ok');

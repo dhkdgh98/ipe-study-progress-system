@@ -835,14 +835,97 @@
   }
   async function importAtlasFile(file){return importFile(file)}
 
+  async function settleBeforeForcedReplace(){
+    clearTimeout(commitTimer);
+    clearTimeout(retryTimer);
+    clearTimeout(historyIdleTimer);
+    clearTimeout(historyContinuousTimer);
+    clearTimeout(historyRetryTimer);
+    const working=inFlight;
+    const named=historyInFlight;
+    if(working)try{await working}catch{}
+    if(named)try{await named}catch{}
+  }
+  function clearOriginLocalStorage(){
+    if(typeof localStorage.clear==='function'){
+      localStorage.clear();
+      return;
+    }
+    const keys=[];
+    for(let index=0;index<Number(localStorage.length||0);index++){
+      const key=localStorage.key?.(index);
+      if(key!==null&&key!==undefined)keys.push(key);
+    }
+    for(const key of keys)localStorage.removeItem(key);
+  }
+  async function forceReplaceLocal(row,{source='server-force',serverHead=row}={}){
+    if(!row)throw new Error('강제 적용할 서버 데이터가 없음');
+    const localSync={...(cfg()||{})};
+    const candidate={
+      version:2,
+      app:{
+        ...row.app_state,
+        settings:{...(row.app_state?.settings||{}),supabaseSync:localSync},
+      },
+      atlas:row.atlas_state,
+      bridge:row.bridge_state,
+    };
+    const audit=validate(candidate);
+    if(!audit.ok)throw new Error('서버 데이터 무결성 오류: '+audit.errors.join(' / '));
+    const targetHash=row.payload_hash||await sha256(stable({
+      version:2,
+      app:appData(candidate.app),
+      atlas:candidate.atlas,
+      bridge:candidate.bridge,
+    }));
+    const headHash=serverHead?.payload_hash||targetHash;
+    const isCurrentHead=targetHash===headHash;
+    await settleBeforeForcedReplace();
+    importInProgress=true;
+    try{
+      await ensureKernel();
+      await kernel?.clearAllData();
+      clearOriginLocalStorage();
+      const canonical={version:2,app:appData(candidate.app),atlas:candidate.atlas,bridge:candidate.bridge};
+      // Seed the selected server copy immediately so a later IndexedDB failure
+      // cannot leave the browser with a blank localStorage.
+      mirrorPayload(canonical);
+      await persistPayload(canonical,{reason:source,enqueue:false,source});
+      global.applySnapshotPayload(candidate);
+      localStorage.removeItem(PENDING_IMPORT_KEY);
+      delete global.__ipeNormalizedImportGuard;
+      recentEditContext=null;
+      startupState='ready';
+      setMeta({
+        serverRevision:Number(serverHead?.revision)||0,
+        lastPayloadHash:headHash,
+        lastPullAt:now(),
+        lastLocalAt:now(),
+        dirty:!isCurrentHead,
+        serverState:isCurrentHead?'saved':'restore-pending',
+        localState:'saved',
+        restorePending:!isCurrentHead,
+        generation:isCurrentHead?0:1,
+        committedGeneration:0,
+        lastReason:source,
+        lastConflict:'',
+        lastError:'',
+      });
+      return {row:serverHead,target:row,audit,forced:true,restorePending:!isCurrentHead};
+    }finally{
+      importInProgress=false;
+    }
+  }
   function localChangedDuringStartup(){
     const error=new Error('서버 최신본 적용 중 로컬 변경이 감지되어 자동 적용을 중단함');
     error.code='LOCAL_CHANGED_DURING_STARTUP';
     return error;
   }
   async function pull({automatic=false,remote:providedRemote=null,expectedGeneration=null}={}){
+    if(!automatic)await settleBeforeForcedReplace();
     const remote=providedRemote||await head();
     if(!remote)throw new Error('서버에 저장된 데이터가 없음');
+    if(!automatic)return forceReplaceLocal(remote,{source:'server-latest-force',serverHead:remote});
     const currentMeta=meta();
     if(currentMeta.dirty&&currentMeta.serverState!=='conflict')throw new Error('저장되지 않은 로컬 변경이 있어 원격 적용을 차단함');
     const guardedGeneration=expectedGeneration===null?Number(currentMeta.generation||0):Number(expectedGeneration);
@@ -859,7 +942,6 @@
     };
     const audit=validate(candidate);
     if(!audit.ok)throw new Error('원격 데이터 무결성 오류: '+audit.errors.join(' / '));
-    if(!automatic&&!confirm(`서버의 최신 데이터를 적용할까?\n현재 로컬 데이터는 적용 전에 보존된다.`))return {cancelled:true};
     localStorage.setItem(PREPULL_KEY,JSON.stringify({savedAt:now(),payload:current}));
     await ensureKernel();
     await kernel?.checkpoint(current,{source:'pre-pull',metadata:{remoteRevision:Number(remote.revision)||0}});
@@ -939,7 +1021,10 @@
     return rpc('ipe_list_history',{p_sync_id:identity.syncId,p_write_hash:identity.writeHash,p_limit:limit});
   }
   async function loadHistory(historyId){
+    await settleBeforeForcedReplace();
     const c=cfg(),identity=await ids(c.syncKey);
+    const serverHead=await head();
+    if(!serverHead)throw new Error('서버 최신 데이터를 확인할 수 없음');
     const rows=await rpc('ipe_load_history',{
       p_sync_id:identity.syncId,
       p_write_hash:identity.writeHash,
@@ -947,8 +1032,7 @@
     });
     const row=Array.isArray(rows)?rows[0]||null:rows;
     if(!row)throw new Error('선택한 복구 기록을 찾을 수 없음');
-    const candidate={version:2,app:row.app_state,atlas:row.atlas_state,bridge:row.bridge_state};
-    const result=await applyCandidate(candidate,{source:`server-history-${historyId}`});
+    const result=await forceReplaceLocal(row,{source:`server-history-force-${historyId}`,serverHead});
     return {...result,historyId};
   }
   async function ensureStartupReady(){
@@ -1105,7 +1189,7 @@
     const m=meta();
     return `<section class="panel"><div class="panel-head"><div><div class="panel-title">저장·기록·복구</div><div class="panel-note">App·Atlas·Bridge 전체를 로컬과 서버에 저장하고, 의미 있는 시점만 이름 있는 복구 기록으로 남긴다.</div></div></div><div class="panel-body">`+
       `<div class="cloud-status" id="v2SyncStatus">${statusHtml(m)}</div>`+
-      `<div class="cloud-actions"><button class="primary" data-sync-action="save">저장</button><button data-sync-action="backup">통합 백업 다운로드</button><button data-sync-action="pick-import">백업 가져오기</button><button data-sync-action="pull">서버 최신 데이터 적용</button>${m.serverState==='conflict'?'<button data-sync-action="keep-local">로컬 데이터로 서버 갱신</button>':''}<button data-sync-action="history">복구 기록</button><button data-sync-action="audit">무결성 점검</button></div>`+
+      `<div class="cloud-actions"><button class="primary" data-sync-action="save">저장</button><button data-sync-action="backup">통합 백업 다운로드</button><button data-sync-action="pick-import">백업 가져오기</button><button data-sync-action="pull">서버 최신 데이터 강제 적용</button>${m.serverState==='conflict'?'<button data-sync-action="keep-local">로컬 데이터로 서버 갱신</button>':''}<button data-sync-action="history">복구 기록</button><button data-sync-action="audit">무결성 점검</button></div>`+
       `<details style="margin-top:14px"><summary style="cursor:pointer;color:var(--soft);font-weight:800">Supabase 연결·고급 설정</summary><div class="cloud-grid" style="margin-top:12px">`+
       `<div class="setting"><label>Supabase Project URL</label><input id="sbUrl" value="${escapeHtml(c.url||'')}" placeholder="https://xxxxx.supabase.co"></div>`+
       `<div class="setting"><label>Publishable / Anon Key</label><input id="sbAnonKey" type="password" value="${escapeHtml(c.anonKey||'')}"></div>`+
@@ -1133,7 +1217,10 @@
     }
     if(action==='backup')await createBackup();
     if(action==='pick-import')document.getElementById('syncImportFile')?.click();
-    if(action==='pull')await pull();
+    if(action==='pull'){
+      await pull();
+      global.showToast?.('이 기기의 로컬 데이터를 비우고 서버 최신본을 강제 적용했어.');
+    }
     if(action==='keep-local')await resolveConflictKeepLocal();
     if(action==='history'){
       const rows=await history();
@@ -1141,10 +1228,15 @@
       if(status)status.innerHTML=(rows||[]).map(row=>
         `<div style="display:flex;gap:8px;align-items:center;justify-content:space-between;margin:6px 0">`+
         `<span>${escapeHtml(row.label)} · 개념 ${row.concept_count} · 연결 ${row.bridge_link_count}</span>`+
-        `<button class="small" data-sync-action="restore-history" data-history-id="${escapeHtml(row.history_id)}">이 기록 복구</button></div>`
+        `<button class="small" data-sync-action="restore-history" data-history-id="${escapeHtml(row.history_id)}">이 기록 강제 복구</button></div>`
       ).join('')||'복구 기록 없음';
     }
-    if(action==='restore-history')await loadHistory(button?.dataset.historyId);
+    if(action==='restore-history'){
+      const result=await loadHistory(button?.dataset.historyId);
+      global.showToast?.(result.restorePending
+        ?'이 기기의 로컬 데이터를 비우고 선택한 복구 기록을 적용했어. 서버까지 되돌리려면 저장을 눌러.'
+        :'이 기기의 로컬 데이터를 비우고 선택한 서버 기록을 적용했어.');
+    }
     if(action==='audit'){
       const payload=await collectPayload({flush:true});
       const audit=validate(payload);

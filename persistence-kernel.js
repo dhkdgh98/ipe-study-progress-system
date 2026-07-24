@@ -175,6 +175,21 @@
     if(!db)return Object.values(fallbackState()[store]).map(clone);
     return idbTransaction([store],'readonly',transaction=>requestResult(transaction.objectStore(store).getAll()));
   }
+  async function clearAllData(){
+    const stores=['snapshots','meta','checkpoints','outbox','historyOutbox'];
+    const db=await openDatabase();
+    if(!db){
+      fallbackCache=emptyFallback();
+      saveFallback();
+    }else{
+      await idbTransaction(stores,'readwrite',transaction=>Promise.all(
+        stores.map(store=>requestResult(transaction.objectStore(store).clear()))
+      ));
+    }
+    snapshotCache=null;
+    emit('local-data-cleared');
+    return {cleared:true,stores};
+  }
 
   function emit(type,detail={}){
     const event={type,instanceId,at:iso(),...detail};
@@ -663,6 +678,7 @@
     releaseInterrupted,
     pendingCount,
     supersedeOpen,
+    clearAllData,
     ensureHistoryOutbox,
     listHistoryOutbox,
     claimNextHistory,

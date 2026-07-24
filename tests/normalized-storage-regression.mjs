@@ -42,6 +42,9 @@ assert.match(client,/remoteIsNewer&&localIsClean/,'a clean stale device must fas
 assert.match(client,/!current\.lastPayloadHash&&isPristinePayload\(payload\)/,'a fresh empty device may safely receive the server head');
 assert.match(client,/HISTORY_IDLE_MS=2\*60\*1000/,'idle history timing must be explicit');
 assert.match(client,/HISTORY_CONTINUOUS_MS=10\*60\*1000/,'continuous-edit history timing must be explicit');
+assert.match(client,/clearOriginLocalStorage\(\)/,'manual server replacement must clear the old origin localStorage');
+assert.match(client,/kernel\?\.clearAllData\(\)/,'manual server replacement must clear IndexedDB snapshots, outboxes, and checkpoints');
+assert.match(client,/if\(!automatic\)return forceReplaceLocal\(remote/,'the server latest button must bypass dirty-local pull restrictions');
 assert.match(client,/다른 디바이스가 먼저 저장함/,'client must surface multi-device conflicts');
 assert.match(client,/저장되지 않은 로컬 변경이 있어 원격 적용을 차단함/,'pull must not overwrite dirty local data');
 assert.match(client,/PREPULL_KEY/,'pull must preserve a local pre-apply backup');
@@ -81,6 +84,7 @@ assert.doesNotMatch(html,/if\(res\?\.state\)\{latest=res;break;\}/,'manual flush
 assert.match(kernel,/createObjectStore\('snapshots'/,'the kernel must persist a canonical snapshot in IndexedDB');
 assert.match(kernel,/createObjectStore\('outbox'/,'the kernel must persist the server outbox in IndexedDB');
 assert.match(kernel,/createObjectStore\('historyOutbox'/,'named history retries must survive refreshes');
+assert.match(kernel,/async function clearAllData\(\)/,'the kernel must expose an explicit destructive local reset');
 assert.match(kernel,/operation\.status==='pending'.*attemptCount/s,'only never-sent pending operations may be coalesced');
 assert.match(kernel,/status:'sending'/,'claimed outbox operations must become durable in-flight records');
 assert.match(kernel,/navigator\?\.locks\?\.request/,'the kernel must coordinate the server writer through Web Locks when available');
