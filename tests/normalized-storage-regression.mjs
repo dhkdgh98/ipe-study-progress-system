@@ -3,6 +3,7 @@ import fs from 'node:fs';
 
 const sql=fs.readFileSync(new URL('../supabase-normalized-v2.sql',import.meta.url),'utf8');
 const client=fs.readFileSync(new URL('../normalized-sync.js',import.meta.url),'utf8');
+const kernel=fs.readFileSync(new URL('../persistence-kernel.js',import.meta.url),'utf8');
 const html=fs.readFileSync(new URL('../index.html',import.meta.url),'utf8');
 
 assert.match(sql,/on conflict \(sync_id,item_id,concept_id\) do update/i,'active link upsert must name its conflict key');
@@ -25,8 +26,9 @@ assert.doesNotMatch(sql,/delete from public\.ipe_revisions/,'revision history mu
 assert.match(sql,/create or replace function public\.ipe_load_revision/,'a selected historical revision must be readable for recovery');
 assert.match(sql,/grant execute on function public\.ipe_load_revision\(text,text,bigint\)/,'historical revision recovery must be exposed only through its RPC');
 
-assert.match(client,/payloadHash===latestBeforeWrite\.lastPayloadHash/,'unchanged data must not create a commit');
-assert.match(client,/p_expected_revision:Number\(start\.serverRevision\)/,'client commits must use optimistic concurrency');
+assert.match(client,/captured\.snapshot\?\.payloadHash===meta\(\)\.lastPayloadHash&&pendingBefore===0/,'unchanged data without an outbox operation must not create a commit');
+assert.match(client,/p_expected_revision:Number\(operation\.expectedRevision\)/,'durable operations must retain their optimistic concurrency base');
+assert.match(client,/p_operation_id:operation\.operationId/,'commit retries must reuse the durable operation id');
 assert.match(client,/다른 디바이스가 먼저 저장함/,'client must surface multi-device conflicts');
 assert.match(client,/저장되지 않은 로컬 변경이 있어 원격 적용을 차단함/,'pull must not overwrite dirty local data');
 assert.match(client,/PREPULL_KEY/,'pull must preserve a local pre-apply backup');
@@ -41,7 +43,8 @@ assert.match(client,/__ipeNormalizedImportGuard/,'backup import must guard again
 assert.match(client,/importInProgress\|\|\(guard&&Date\.now\(\)<guard\.until\)/,'imports must suppress every automatic commit trigger');
 assert.match(client,/serverState:'restore-pending'/,'imports must wait for explicit confirmation before a server commit');
 assert.match(client,/lastReason:'backup-restore'/,'restores must remain identifiable in synchronization metadata');
-assert.match(client,/PENDING_IMPORT_KEY/,'imported data must remain authoritative until the iframe acknowledges it');
+assert.match(client,/Compatibility recovery marker only/,'the old pending-import key must be a recovery marker rather than the canonical read source');
+assert.match(client,/const canonical=kernel\?\.peekSnapshot\(\)\?\.payload/,'canonical local reads must prefer the persistence kernel');
 assert.match(client,/currentCfg\.auto=false;currentCfg\.autoPull=false/,'the legacy automatic snapshot path must stay disabled');
 assert.match(client,/generation:Number\(currentMeta\.generation\|\|0\)\+1/,'restores must advance the change generation');
 assert.match(client,/data\.type==='ipe-atlas-bridge-updated'.*markChanged\('bridge-data-change'/s,'Bridge-only changes must schedule the unified commit path');
@@ -56,7 +59,18 @@ assert.match(html,/data-sync-action="save">지금 저장/,'the top bar must expo
 assert.match(html,/id="localSyncState"/,'the top bar must show local persistence independently');
 assert.match(html,/id="serverSyncState"/,'the top bar must show server persistence independently');
 assert.match(html,/id="syncImportFile"/,'the top bar restore action must use the unified importer');
-assert.match(html,/normalized-sync\.js/,'normalized sync runtime must be loaded');
+assert.match(html,/persistence-kernel\.js[\s\S]*normalized-sync\.js/,'the persistence kernel must load before the sync runtime');
 assert.match(html,/IpeNormalizedSync\?\.install\(\)/,'normalized sync runtime must be installed before initial render');
+assert.match(html,/ipe-kernel-commit-ack/,'Atlas iframe writes must use a parent acknowledgement protocol');
+assert.match(html,/Promise\.all\(frames\.map\(frame=>v17FrameRequest\(frame\)\)\)/,'manual flush must wait for every active Atlas frame');
+assert.doesNotMatch(html,/if\(res\?\.state\)\{latest=res;break;\}/,'manual flush must not accept the first iframe response as canonical');
+
+assert.match(kernel,/createObjectStore\('snapshots'/,'the kernel must persist a canonical snapshot in IndexedDB');
+assert.match(kernel,/createObjectStore\('outbox'/,'the kernel must persist the server outbox in IndexedDB');
+assert.match(kernel,/operation\.status==='pending'.*attemptCount/s,'only never-sent pending operations may be coalesced');
+assert.match(kernel,/status:'sending'/,'claimed outbox operations must become durable in-flight records');
+assert.match(kernel,/navigator\?\.locks\?\.request/,'the kernel must coordinate the server writer through Web Locks when available');
+assert.match(kernel,/legacyKeysRetained:true/,'verified migration must retain the old keys for recovery');
+assert.match(kernel,/expectedHash!==|payloadHash!==expectedHash/,'migration must compare a read-back hash');
 
 console.log('normalized storage regression: ok');

@@ -1,0 +1,64 @@
+@startuml
+!include _style.puml
+title TO-BE 01 · 로컬 우선 저장과 응답 유실 재시도
+
+actor User
+participant "App / Atlas iframe" as Editor
+participant "Parent Coordinator" as Parent
+participant "Normalized Adapter" as Adapter
+participant "Persistence Kernel" as Kernel
+database "IndexedDB" as IDB
+participant "Outbox Worker" as Worker
+participant "Writer Lock" as Lock
+participant "Supabase RPC" as RPC
+database "PostgreSQL" as DB
+participant "상태 UI" as UI
+
+User -> Editor : 데이터 변경
+Editor -> Editor : compatibility mirror\n+ dirty marker
+
+alt Atlas 변경
+  Editor -> Parent : snapshot(baseGeneration)
+  Parent -> Parent : 현재 generation과 비교
+  Parent --> Editor : ACK(generation+1)
+  Parent -> Adapter : accepted Atlas + Bridge
+else App 변경
+  Editor -> Adapter : data-change
+end
+
+Adapter -> Adapter : App·Atlas·Bridge validate
+Adapter -> Kernel : writeSnapshot(payload, remote)
+Kernel -> IDB : snapshot + pending outbox\natomic transaction
+IDB --> Kernel : read-back hash/count
+Kernel -> Editor : compatibility mirror 갱신\n+ dirty marker 제거
+Kernel -> UI : 로컬 · 저장됨\n서버 · 저장 대기
+
+Worker -> Lock : workspace writer 획득
+Worker -> IDB : claim oldest pending
+IDB --> Worker : operationId · expectedRevision · payload
+Worker -> RPC : ipe_commit_state(same operationId)
+RPC -> DB : operation replay 확인\nrevision CAS\nappend + projection
+
+alt 정상 응답
+  DB --> RPC : revision N
+  RPC --> Worker : revision N
+else 서버 성공 후 응답 유실
+  DB --> RPC : revision N committed
+  RPC -x Worker : response lost
+  Worker -> IDB : 같은 operationId를 pending으로 복귀
+  Worker -> RPC : retry(same operationId)
+  RPC -> DB : operationId replay lookup
+  DB --> RPC : existing revision N
+  RPC --> Worker : revision N · replayed
+end
+
+Worker -> RPC : ipe_load_head()
+RPC -> DB : load head
+DB --> RPC : revision N + payloadHash
+RPC --> Worker : verified head
+Worker -> IDB : operation acked\nfollowing pending expectedRevision=N
+Worker -> UI : 서버 · rN 저장됨
+Worker -> Lock : release
+
+caption 로컬 완료는 IndexedDB 검증 시점이며, 서버 완료는 같은 operation의 head 검증 시점이다.
+@enduml

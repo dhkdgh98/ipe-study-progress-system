@@ -11,12 +11,12 @@ page.on('pageerror',error=>pageErrors.push(error.message));
 
 try{
   await page.goto(baseUrl,{waitUntil:'networkidle'});
-  await page.evaluate(()=>{
+  await page.evaluate(async()=>{
     const app=window.__ipeGetAppState();
     app.progress['001']={d0:'2026-07-24',reviews:{}};
     app.notes['001']='refresh-safe';
-    localStorage.setItem('ipe-learning-os-v4',JSON.stringify(app));
-    localStorage.setItem('concept-atlas-v3-feed',JSON.stringify({
+    window.save('browser-smoke');
+    const atlas={
       concepts:[{
         id:'smoke-c1',
         title:'저장 테스트',
@@ -31,12 +31,13 @@ try{
       frames:[],
       objects:[],
       keywords:[],
-    }));
-    localStorage.setItem('ipe-atlas-bridge-v1',JSON.stringify({
+    };
+    const bridge={
       links:[{itemId:'001',conceptId:'smoke-c1',role:'핵심'}],
       orphanedLinks:[],
       catalog:[],
-    }));
+    };
+    await window.IpeNormalizedSync.acceptAtlasSnapshot(atlas,bridge,{reason:'browser-smoke'});
   });
   const before=await page.evaluate(()=>({
     app:localStorage.getItem('ipe-learning-os-v4'),
@@ -46,6 +47,7 @@ try{
   await page.reload({waitUntil:'networkidle'});
   const after=await page.evaluate(()=>({
     payload:window.IpeNormalizedSync.localPayload(),
+    kernel:window.IpePersistenceKernel.diagnostics(),
     app:localStorage.getItem('ipe-learning-os-v4'),
     atlas:localStorage.getItem('concept-atlas-v3-feed'),
     bridge:localStorage.getItem('ipe-atlas-bridge-v1'),
@@ -55,6 +57,7 @@ try{
   assert.equal(after.payload.app.progress['001'].d0,'2026-07-24');
   assert.equal(after.payload.atlas.concepts[0].id,'smoke-c1');
   assert.equal(after.payload.bridge.links[0].conceptId,'smoke-c1');
+  assert.equal(after.kernel.snapshot.payloadHash.length,64,'IndexedDB kernel must retain a verified SHA-256 snapshot');
   assert.equal(after.app,before.app,'page reload must preserve App storage');
   assert.equal(after.atlas,before.atlas,'page reload must preserve Atlas storage');
   const beforeBridge=JSON.parse(before.bridge),afterBridge=JSON.parse(after.bridge);

@@ -7,11 +7,18 @@ const storage=new Map();
 const window={
   crypto:webcrypto,
   TextEncoder,
-  localStorage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>storage.set(key,String(value))},
+  structuredClone,
+  navigator:{onLine:true},
+  localStorage:{
+    getItem:key=>storage.get(key)??null,
+    setItem:(key,value)=>storage.set(key,String(value)),
+    removeItem:key=>storage.delete(key),
+  },
   __ipeGetAppState:()=>({version:4,progress:{},notes:{},settings:{examDate:'2026-08-07',supabaseSync:{syncKey:'must-not-leak'}}}),
   v17StorageGet:key=>JSON.parse(storage.get(key)??'null'),
 };
 const context={window,crypto:webcrypto,TextEncoder,localStorage:window.localStorage,console,setTimeout,clearTimeout,confirm:()=>false,Blob,URL};
+vm.runInNewContext(fs.readFileSync(new URL('../persistence-kernel.js',import.meta.url),'utf8'),context);
 vm.runInNewContext(fs.readFileSync(new URL('../normalized-sync.js',import.meta.url),'utf8'),context);
 
 const validate=window.IpeNormalizedSync.validate;
@@ -49,8 +56,8 @@ window.applySnapshotPayload=()=>{
 };
 const importResult=await window.IpeNormalizedSync.importAtlasFile({text:async()=>JSON.stringify(base)});
 assert.equal(importResult.audit.ok,true,'valid integrated backup must import');
-assert.equal(window.IpeNormalizedSync.localPayload().atlas.concepts.length,1,'pending import must survive an immediate empty iframe overwrite');
-assert.ok(storage.has('ipe-normalized-pending-import-v2'),'import must remain durable until iframe acknowledgement');
+assert.equal(window.IpeNormalizedSync.localPayload().atlas.concepts.length,1,'the canonical kernel snapshot must survive an immediate empty iframe overwrite');
+assert.ok(storage.has('ipe-normalized-pending-import-v2'),'the compatibility recovery marker must remain until iframe acknowledgement');
 
 storage.delete('ipe-normalized-pending-import-v2');
 storage.set('concept-atlas-v3-feed',JSON.stringify(base.atlas));

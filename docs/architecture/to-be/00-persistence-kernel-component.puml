@@ -1,0 +1,56 @@
+@startuml
+!include _style.puml
+title TO-BE 00 · Persistence Kernel 컴포넌트
+left to right direction
+skinparam nodesep 60
+skinparam ranksep 75
+
+package "브라우저 UI" {
+  component "App UI\nprogress · notes · settings" as App
+  component "Atlas Parent Coordinator\nStudy + Global iframe\n세대 검증 · ACK · broadcast" as Atlas
+  component "Backup / Restore\nJSON schema v3" as Backup
+
+  App -[hidden]down-> Atlas
+  Atlas -[hidden]down-> Backup
+}
+
+package "단일 Persistence 계층" {
+  component "Normalized Adapter\ncapture · validate\nstatus projection" as Adapter
+  component "Persistence Kernel\ncanonical ownership\ncheckpoint · mirror" as Kernel
+  component "Outbox Worker\nstable operationId\nWeb Lock · lease" as Worker
+
+  Adapter -down-> Kernel : validated payload
+  Kernel -down-> Worker : outbox ready
+}
+
+package "브라우저 영속 저장" {
+  database "IndexedDB\nworking snapshot\noutbox · meta · checkpoints" as IDB
+  database "localStorage\ncompatibility mirror\ndirty marker" as LS
+
+  IDB -[hidden]down-> LS
+}
+
+package "원격 저장" {
+  cloud "Supabase RPC" as RPC
+  database "PostgreSQL\nrevision CAS\nappend-only history\nnormalized projection" as DB
+
+  RPC -down-> DB : transaction
+}
+
+App -right-> Adapter : data-change
+Atlas -right-> Adapter : accepted Atlas + Bridge
+Backup -right-> Kernel : restore candidate
+Kernel -left-> Backup : canonical backup
+Kernel -right-> IDB : snapshot + outbox\none transaction
+Kernel -right-> LS : verified mirror
+Worker -right-> IDB : claim / ack
+Worker -right-> RPC : expectedRevision\nsame operationId
+
+note bottom of IDB
+  기준 원본은 working snapshot이다.
+  pending import와 iframe localStorage는
+  읽기 우선권을 갖지 않는다.
+end note
+
+caption UI writer는 명령만 제출하고, 기준 상태·재시도·복구 이력은 Persistence Kernel이 소유한다.
+@enduml

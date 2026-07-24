@@ -1,0 +1,23 @@
+skinparam defaultFontName "Malgun Gothic"
+skinparam dpi 150
+skinparam shadowing false
+skinparam roundcorner 8
+skinparam linetype ortho
+skinparam packageStyle rectangle
+skinparam componentStyle uml2
+skinparam defaultFontColor #111827
+skinparam ArrowColor #4B5563
+skinparam BorderColor #4B5563
+skinparam BackgroundColor #FFFFFF
+skinparam NoteBackgroundColor #FFF8DC
+skinparam NoteBorderColor #8B7355
+skinparam LegendBackgroundColor #F8FAFC
+skinparam LegendBorderColor #94A3B8
+skinparam StateBackgroundColor #F8FAFC
+skinparam StateBorderColor #475569
+skinparam ActivityBackgroundColor #F8FAFC
+skinparam ActivityBorderColor #475569
+skinparam SequenceLifeLineBorderColor #64748B
+skinparam SequenceGroupBorderColor #64748B
+skinparam SequenceGroupBackgroundColor #F8FAFC
+hide stereotype

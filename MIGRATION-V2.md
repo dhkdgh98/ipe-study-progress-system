@@ -16,12 +16,12 @@
 
 1. 현재 브라우저와 외부 파일에 백업을 유지한다.
 2. Supabase SQL Editor에서 `supabase-normalized-v2.sql` 전체를 실행한다.
-3. 새 버전의 `index.html`, `normalized-sync.js`, `supabase-normalized-v2.sql`을 함께 배포한다.
-4. 앱의 운영 설정에서 `정규화 저장소 v2` 패널을 연다.
+3. 새 버전의 `index.html`, `persistence-kernel.js`, `normalized-sync.js`, `supabase-normalized-v2.sql`을 함께 배포한다.
+4. 앱의 운영 설정에서 `저장·백업·복구` 패널을 연다.
 5. `Atlas 백업 가져오기`로 v17 통합 백업을 선택한다. 통합 백업이면 App·Bridge·Atlas를 함께 적용하고, Atlas 단독 백업이면 현재 App·Bridge를 유지한다.
 6. 본문이 없는 Bridge 연결이 발견되면 고아 연결 보관소로 분리하는 작업을 확인한다.
 7. `무결성 점검`이 정상인지 확인한다.
-8. `현재 데이터 커밋`을 눌러 revision 1을 만든다.
+8. `지금 저장`을 눌러 revision 1을 만든다.
 9. `revision 이력`에서 개념 수와 연결 수를 확인한다.
 
 기존 `learning_os_snapshots` 테이블은 자동으로 삭제하지 않는다. v2가 정상 동작하고 별도 백업을 확보할 때까지 레거시 복구 자료로 보존한다.
@@ -40,11 +40,17 @@
 
 현재 v2의 우선 목표는 무손실과 충돌 차단이다. 같은 base revision에서 발생한 서로 다른 카드 변경을 자동 병합하는 mutation API는 다음 단계로 추가할 수 있지만, 자동 병합이 없어도 오래된 전체 상태가 최신 상태를 삭제하는 동작은 차단된다.
 
+충돌이 확인되면 일반 `지금 저장`은 원격 커밋을 추가로 시도하지 않는다. 운영 설정에서 다음 중 하나를 명시적으로 선택한다.
+
+- `서버 최신 revision 적용`: 현재 로컬을 IndexedDB checkpoint로 보존하고 서버 상태를 적용한다.
+- `로컬을 새 revision으로 저장`: 서버 head를 새 기준으로 읽은 뒤 현재 로컬을 다음 revision으로 커밋한다. 기존 서버 revision은 이력에 남는다.
+
 ## 운영 원칙
 
 - 충돌 발생 시 어느 한쪽을 즉시 덮어쓰지 않는다.
-- 원격 적용 전 현재 로컬 상태를 `ipe-normalized-prepull-v2`에 보존한다.
-- Atlas 백업 적용 전 상태는 `ipe-normalized-preimport-v2`에 보존한다.
+- 원격 적용 전 현재 로컬 상태를 IndexedDB checkpoint와 `ipe-normalized-prepull-v2` 호환 복사본에 보존한다.
+- Atlas 백업 적용 전 상태를 IndexedDB checkpoint와 `ipe-normalized-preimport-v2` 호환 복사본에 보존한다.
+- 기존 localStorage 키는 IndexedDB migration의 해시·개수 read-back 검증이 끝나도 자동 삭제하지 않는다.
 - `ipe_revisions` 행을 update 또는 delete하지 않는다.
 - revision 정리 정책을 만들기 전에는 서버 이력을 수동 삭제하지 않는다.
 - 기존 레거시 테이블은 v2 검증 완료 전까지 삭제하지 않는다.

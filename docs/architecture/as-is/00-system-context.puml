@@ -1,35 +1,36 @@
 @startuml
 !include _style.puml
-title AS-IS 00 — 시스템 컨텍스트
+title AS-IS 00 — 시스템 컨텍스트: 사용자에게 보이는 저장 경계
 left to right direction
 
-actor "사용자" as User
+actor "현재 사용자" as User
+actor "동일 사용자\n다른 기기·브라우저" as Other
 
-rectangle "IPE Learning OS\n브라우저 애플리케이션" as System {
-  component "학습 진도 App" as App
-  component "Concept Atlas" as Atlas
-  component "Bridge" as Bridge
-  component "통합 저장 UI/코디네이터" as Sync
-}
-
-cloud "정적 호스팅" as Hosting
-cloud "Supabase REST/RPC" as Supabase
-database "PostgreSQL\nrevision + projection" as DB
+rectangle "IPE Learning OS\n논리적 시스템" as System
+database "브라우저 localStorage\n기기·프로필·origin별 분리" as Local
+cloud "Supabase 원격 저장소\nrevision + projection" as Supabase
 file "JSON 백업 파일" as Backup
-rectangle "GitHub 저장소/배포" as GitHub
 
 User --> System : 학습·편집·저장·복구
-GitHub --> Hosting : 정적 파일 배포
-Hosting --> System : index.html / JS / SQL 안내
-System --> Supabase : anon key + syncKey 파생 ID\nRPC 호출
-Supabase --> DB : security definer 함수
-System --> Backup : 백업 내보내기
-Backup --> System : 백업 가져오기
+Other --> System : 같은 프로그램을 별도 인스턴스로 실행
+System <--> Local : 자동·수동 로컬 저장 [S]
+System <--> Supabase : syncKey workspace에\nrevision commit·load [S][D]
+System <--> Backup : schema v3 내보내기·가져오기 [S][F]
+
+note bottom of Local
+  각 실행 인스턴스는 서로 다른 localStorage를 가진다.
+  새로고침은 같은 origin 저장소를 다시 읽지만,
+  다른 기기와 자동으로 합쳐지지는 않는다. [S]
+end note
+
+note bottom of Supabase
+  사용자 계정 대신 공유 syncKey에서
+  workspace ID와 write hash를 파생한다. [S][D]
+end note
 
 note bottom of System
-  [S] App·Atlas·Bridge는 브라우저에서 실행된다.
-  [S] 현재 사용자 계정 대신 공유 syncKey를 사용한다.
-  [F] 과거와 현재의 여러 JSON 형식이 존재한다.
+  내부 App·Atlas·Bridge·Sync 구성은 02에서,
+  실행 노드와 복사본은 01에서 설명한다.
 end note
 
 legend right
@@ -41,5 +42,5 @@ legend right
   | [I] | 근거 기반 추론 |
 endlegend
 
-caption 기준 commit f15e1bd9802c98c43bc6f8c72e18572b9619db1f
+caption 한 사용자가 여러 실행 인스턴스를 사용할 수 있지만, 로컬 저장은 분리되고 Supabase workspace만 공유된다.
 @enduml

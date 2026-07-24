@@ -1,0 +1,65 @@
+@startuml
+!include _style.puml
+title TO-BE 02 · 시작 복구와 서버 충돌 의사결정
+
+start
+:IndexedDB working snapshot 읽기;
+
+if (legacy dirty marker 존재?) then (yes)
+  :App·Atlas·Bridge legacy mirror 읽기;
+  :공유 invariant 검증;
+  if (유효한가?) then (yes)
+    :현재 canonical checkpoint;
+    :legacy payload를 canonical로 기록;
+    :read-back hash/count 검증;
+    if (검증 성공?) then (yes)
+      :dirty marker 제거;
+      :서버 outbox 재개 대상으로 표시;
+    else (no)
+      :marker와 기존 키 유지;
+      :로컬 저장 실패 표시;
+      stop
+    endif
+  else (no)
+    :기존 canonical 유지;
+    :복구 차단 오류 표시;
+    stop
+  endif
+else (no)
+  if (canonical과 mirror가 다른가?) then (yes)
+    :검증된 canonical로 UI와 mirror 복구;
+  endif
+endif
+
+:중단된 sending operation을\n같은 operationId의 pending으로 복귀;
+:Supabase head 읽기;
+
+if (local hash = remote hash?) then (yes)
+  :serverRevision 갱신;
+  :일치하는 outbox ack;
+  :서버 저장됨;
+  stop
+else (no)
+  if (local base = remote revision?) then (yes)
+    :outbox worker로 자동 커밋;
+    stop
+  else (no)
+    :자동 덮어쓰기 중단;
+    :충돌 상태 표시;
+  endif
+endif
+
+if (사용자 선택) then (서버 적용)
+  :현재 로컬 checkpoint;
+  :서버 revision을 canonical로 기록;
+  :열린 outbox supersede;
+  :UI와 mirror에 적용;
+else (로컬 유지)
+  :현재 로컬 checkpoint;
+  :서버 head를 새 expectedRevision으로 채택;
+  :기존 충돌 operation supersede;
+  :로컬을 다음 revision으로 명시적 커밋;
+endif
+
+stop
+@enduml
