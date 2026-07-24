@@ -1,0 +1,71 @@
+@startuml
+!include _style.puml
+title AS-IS 04 · 동기화 상태 머신: 현재 경로와 누락 전이
+left to right direction
+skinparam linetype polyline
+
+state UNCONFIGURED
+state STARTUP
+state EMPTY_REMOTE
+state SYNCED
+state DIRTY
+state QUEUED
+state SENDING
+state OFFLINE
+state FAILED
+state BLOCKED
+state CONFLICT
+state RESTORE_PENDING
+
+[*] --> STARTUP : 설정 있음
+[*] --> UNCONFIGURED : 설정 없음
+
+STARTUP --> RESTORE_PENDING : restorePending
+STARTUP --> SYNCED : hash 일치
+STARTUP --> QUEUED : dirty · same revision
+STARTUP --> CONFLICT : hash 불일치
+STARTUP --> EMPTY_REMOTE : remote head 없음
+STARTUP --> FAILED : RPC 오류
+
+UNCONFIGURED --> DIRTY : edit
+SYNCED --> DIRTY : edit
+DIRTY --> QUEUED : debounce
+DIRTY --> UNCONFIGURED : 설정 없음
+QUEUED --> SENDING : timer · 지금 저장
+SENDING --> SYNCED : commit + verify
+SENDING --> OFFLINE : network 실패
+SENDING --> FAILED : HTTP · verify 실패
+SENDING --> BLOCKED : client validation 실패
+SENDING --> CONFLICT : revision 충돌
+SENDING --> QUEUED : 전송 중 새 generation
+OFFLINE --> SENDING : online
+FAILED --> SENDING : transient retry
+RESTORE_PENDING --> SENDING : 지금 저장
+RESTORE_PENDING --> DIRTY : edit
+
+EMPTY_REMOTE -[#red,dashed]-> QUEUED : 누락 6 · bootstrap commit
+CONFLICT -[#red,dashed]-> SYNCED : 누락 5 · 서버본 수용
+CONFLICT -[#red,dashed]-> QUEUED : 누락 5 · 로컬 rebase
+RESTORE_PENDING -[#red,dashed]-> DIRTY : 누락 2 · no-frame 완료
+QUEUED -[#red,dashed]-> QUEUED : 누락 4 · 12 · 동일 operation 재개
+
+note bottom of EMPTY_REMOTE
+  EMPTY_REMOTE는 표시만 하고
+  실제 commit timer를 만들지 않는다.
+end note
+
+note bottom of CONFLICT
+  사용자 선택 가능한 충돌 해결 전이가 없다.
+end note
+
+note bottom of RESTORE_PENDING
+  iframe ACK 종속이며 checkpoint rollback 전이가 없다.
+end note
+
+legend bottom
+  검정 실선 = 현재 코드 경로
+  빨간 점선 = 결함으로 확인된 누락 전이
+endlegend
+
+caption UI 상태 문자열은 여러 함수가 직접 설정하며 영속 operation에서 계산되지 않는다.
+@enduml

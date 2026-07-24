@@ -1,0 +1,41 @@
+@startuml
+!include _style.puml
+title AS-IS 07 — UML 시퀀스: 서버 성공 후 응답 유실
+
+actor User
+participant "Normalized Sync" as Sync
+database "local meta" as Meta
+participant "Supabase RPC" as RPC
+database "PostgreSQL" as DB
+
+note over Meta
+  serverRevision = 5
+  dirty = true
+end note
+
+User -> Sync : 지금 저장
+Sync -> Sync : operationId = OP-A
+Sync -> RPC : commit(expected=5, OP-A)
+RPC -> DB : append revision 6\nunique(syncId, OP-A)
+DB --> RPC : success r6
+RPC -x Sync : HTTP 응답 유실
+Sync -> Meta : serverState=failed\ndirty=true
+Sync -> Sync : retryLater()
+
+... backoff ...
+
+Sync -> Sync : commitOnce() 재호출
+Sync -> Sync : operationId = OP-B
+Sync -> RPC : commit(expected=5, OP-B)
+RPC -> DB : OP-B는 새 작업\nheadRevision=6
+DB --> RPC : revision conflict\nexpected 5, actual 6
+RPC --> Sync : 40001 conflict
+Sync -> Meta : serverState=conflict
+
+note over Sync,DB
+  서버의 idempotent replay는 OP-A 재사용 시 동작한다. [D]
+  클라이언트가 재시도에서 OP-B를 생성해 이를 사용하지 못한다. [S][R]
+end note
+
+caption 결함 4 — idempotency가 서버에는 있으나 operation identity가 클라이언트 생명주기에 보존되지 않는다.
+@enduml

@@ -1,0 +1,58 @@
+@startuml
+!include _style.puml
+title AS-IS 12 — UML 활동: 현재 문서화된 v2 migration과 누락 gate
+
+start
+:현재 브라우저와 외부 파일 백업;
+:Supabase에서 normalized v2 SQL 실행;
+:index.html + normalized-sync.js + SQL 함께 배포;
+:운영 설정의 v2 panel 열기;
+:v17 통합 백업 또는 Atlas 백업 가져오기;
+if (본문 없는 Bridge link?) then (yes)
+  :orphanedLinks로 분리;
+endif
+:클라이언트 무결성 점검;
+if (점검 정상?) then (yes)
+  :현재 데이터 commit;
+  :revision 이력에서 count 확인;
+else (no)
+  :commit 중단;
+  stop
+endif
+
+partition "현재 절차에 없는 검증 gate [I]" {
+  :canonical source 선택 확인;
+  if (완전한 Atlas 본문 존재?) then (yes)
+  else (no)
+    :migration 중단;
+    stop
+  endif
+
+  :원본 hash/count/ID inventory;
+  :새 schema dry-run 변환;
+  if (왕복 복구 무손실?) then (yes)
+  else (no)
+    :migration 중단;
+    stop
+  endif
+
+  :구버전 client 쓰기 차단 확인;
+  :충돌·응답 유실·다중 탭 시험;
+  if (rollback 자료 검증?) then (yes)
+    :cutover 승인 가능;
+  else (no)
+    :migration 중단;
+    stop
+  endif
+}
+
+stop
+
+note right
+  [S] 첫 부분은 MIGRATION-V2.md의 현재 절차.
+  [F] 제공된 revision 4 파일은 Atlas가 비어 있어
+  canonical source gate를 통과하지 못한다.
+end note
+
+caption 현재 migration 문서는 설치·count 확인을 다루지만 source 선택, 왕복 무손실, 구버전 차단, rollback gate를 명시하지 않는다.
+@enduml

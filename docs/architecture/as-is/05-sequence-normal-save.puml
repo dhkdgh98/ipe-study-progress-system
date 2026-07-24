@@ -1,0 +1,62 @@
+@startuml
+!include _style.puml
+title AS-IS 05 — UML 시퀀스: 정상 자동/수동 저장
+
+actor User
+participant "App / Atlas / Bridge" as Editor
+participant "기존 로컬 save" as Base
+participant "Normalized Sync" as Sync
+participant "v17 frame flush" as Flush
+database "localStorage" as LS
+participant "Supabase RPC" as RPC
+database "PostgreSQL" as DB
+participant "상단 상태 UI" as UI
+
+User -> Editor : 데이터 편집
+Editor -> Base : save()
+Base -> LS : 해당 모듈 로컬 저장
+Base --> Editor : 저장 완료
+Base -> Sync : wrapper markChanged(reason)
+Sync -> LS : meta dirty=true\ngeneration++
+Sync -> UI : local=saved, server=queued
+
+alt 자동 저장
+  Sync -> Sync : debounce 550~800ms
+else 수동 "지금 저장" / Ctrl+S
+  User -> Sync : flushNow(manual)
+end
+
+Sync -> UI : local/server=saving
+Sync -> Flush : v17FlushAllStores()
+Flush -> Editor : iframe export request
+Editor --> Flush : first valid Atlas/Bridge snapshot
+Flush -> LS : App·Atlas·Bridge 저장
+Flush --> Sync : unified payload
+Sync -> Sync : validate(payload)
+Sync -> Sync : stable hash
+Sync -> Sync : operationId=uuid()
+Sync -> RPC : ipe_commit_state(\nexpectedRevision, operationId, hash, payload)
+RPC -> DB : workspace row lock
+RPC -> DB : validate + projection replace
+RPC -> DB : append revision
+DB --> RPC : revision
+RPC --> Sync : revision, replayed
+Sync -> RPC : ipe_load_head()
+RPC -> DB : load latest revision JSON
+DB --> RPC : revision + payloadHash
+RPC --> Sync : head
+Sync -> LS : serverRevision/hash/dirty=false
+Sync -> UI : local=saved, server=saved
+
+note over Sync
+  [S] 정상 경로에는 collect → validate → hash →
+  optimistic commit → head verify가 존재한다.
+end note
+
+note right of Sync
+  [S] operationId는 commitOnce 안에서 생성되어
+  이 호출의 메모리 수명에만 존재한다.
+end note
+
+caption 정상 경로는 일관되지만 입력 snapshot의 권위와 실패 후 operation 수명은 보장하지 않는다.
+@enduml

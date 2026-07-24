@@ -1,0 +1,69 @@
+@startuml
+!include _style.puml
+title AS-IS 01 · 배치 UML: 실행 노드와 데이터 복사본
+left to right direction
+skinparam linetype polyline
+
+node "사용자 기기 / 동일 브라우저 origin" as Device {
+  node "탭 A" as TabA {
+    component "Parent App\n메모리 상태" as ParentA
+    component "Sync coordinator\n타이머 · inFlight" as SyncA
+    node "studyAtlas iframe" as StudyA
+    node "globalAtlas iframe" as GlobalA
+  }
+
+  node "탭 B (가능)" as TabB {
+    component "별도 Parent 상태\n별도 coordinator" as TabBState
+  }
+
+  database "localStorage\n────────────────\nipe-learning-os-v4\nconcept-atlas-v3-feed\nipe-atlas-bridge-v1\nipe-normalized-sync-v2\nPREIMPORT · PREPULL · PENDING_IMPORT" as LS
+  file "수동 JSON 백업" as Backup
+}
+
+cloud "Supabase" as SB {
+  component "REST RPC\ncommit · load" as RPC
+  database "ipe_revisions\n전체 JSON revision" as Revisions
+  database "current projection\n정규화 테이블" as Projection
+  database "legacy\nlearning_os_snapshots" as LegacyDB
+}
+
+StudyA --> ParentA : postMessage snapshot [S]
+GlobalA --> ParentA : postMessage snapshot [S]
+StudyA --> LS : Atlas 직접 저장 [S]
+GlobalA --> LS : Atlas 직접 저장 [S]
+ParentA --> LS : App · Bridge 저장 [S]
+SyncA --> LS : collect · apply · meta · pending [S]
+TabBState --> LS : 동일 origin 공유 [I]
+
+SyncA --> RPC : commit · load [S]
+RPC --> Revisions : revision append [D]
+RPC --> Projection : 전체 재구축 [D]
+ParentA ..> LegacyDB : 구버전 함수 경로 잔존 [S]
+SyncA --> Backup : export · import [S]
+
+note bottom of TabA
+  결함 1 [S][R]
+  두 iframe이 공통 revision 없이
+  서로 다른 최신성의 메모리를 보유한다.
+end note
+
+note bottom of TabB
+  추가 위험 [I]
+  다중 탭 writer를 조정하는
+  BroadcastChannel/Web Lock이 없다.
+end note
+
+note bottom of LS
+  결함 2 · 3 [S][R]
+  pending이 실데이터보다 우선할 수 있고,
+  sync meta가 workspace별로 분리되지 않는다.
+end note
+
+note bottom of LegacyDB
+  결함 10 [S]
+  normalized install 성공 여부에 따라
+  구버전 저장 함수가 런타임에 교체된다.
+end note
+
+caption 동일한 논리 데이터가 iframe memory, parent memory, localStorage, pending, backup, server revision에 복제된다.
+@enduml

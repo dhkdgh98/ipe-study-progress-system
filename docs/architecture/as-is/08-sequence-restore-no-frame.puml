@@ -1,0 +1,54 @@
+@startuml
+!include _style.puml
+title AS-IS 08 — UML 시퀀스: Atlas iframe 없는 백업 복구
+
+actor User
+participant "Backup Importer" as Importer
+participant "applySnapshotPayload" as Apply
+database "localStorage" as LS
+participant "Atlas iframe" as Frame
+participant "Normalized Sync" as Sync
+participant "App UI" as App
+
+User -> Importer : 백업 파일 선택
+Importer -> Sync : collect current payload
+Sync --> Importer : current
+Importer -> LS : PREIMPORT=current
+Importer -> LS : PENDING_IMPORT=candidate
+Importer -> Apply : app+atlas+bridge 적용
+Apply -> LS : App·Atlas·Bridge 저장
+
+alt 활성 Atlas iframe 있음
+  Apply -> Frame : ipe-atlas-import-state
+  Frame --> Apply : ipe-atlas-saved ACK
+  Apply -> LS : PENDING_IMPORT 제거
+else 활성 Atlas iframe 없음
+  note over Frame
+    dashboard에서는 frame이 존재하지 않을 수 있다.
+  end note
+  Apply -> Apply : ACK 없음
+end
+
+Importer -> LS : restorePending=true\ndirty=true
+User -> App : 복구 후 메모 수정
+App -> LS : 최신 App 저장
+App -> Sync : markChanged()
+Sync -> Sync : current.restorePending이면 timer 중단
+
+User -> Sync : 백업 또는 지금 저장
+Sync -> LS : pendingPayload() 조회
+LS --> Sync : 복구 당시 candidate
+Sync -> Sync : 실제 최신 App보다 pending 우선
+
+note over App,Sync
+  복구 후 편집은 App key에는 존재하지만
+  collect payload에는 포함되지 않는다. [R]
+end note
+
+note over LS
+  PREIMPORT는 저장되지만 이를 복원하는
+  사용자 동작/상태 전이는 없다. [S]
+end note
+
+caption 결함 2·9 — 복구 완료가 화면 구성에 의존하고 pending overlay가 후속 편집을 가린다.
+@enduml

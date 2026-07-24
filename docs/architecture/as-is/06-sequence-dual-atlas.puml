@@ -1,0 +1,46 @@
+@startuml
+!include _style.puml
+title AS-IS 06 — UML 시퀀스: 두 Atlas의 오래된 상태 선택
+
+actor User
+participant "Parent v17 flush" as Parent
+participant "studyAtlas iframe" as Study
+participant "globalAtlas iframe" as Global
+database "parent localStorage" as LS
+participant "Normalized Sync" as Sync
+database "Supabase" as Server
+
+note over Study
+  state.title = "INITIAL"
+end note
+note over Global
+  state.title = "LATEST_GLOBAL"
+end note
+note over LS
+  title = "LATEST_GLOBAL"
+end note
+
+User -> Parent : 지금 저장
+Parent -> Parent : v17ActiveAtlasFrames()\n[studyAtlas, globalAtlas]
+Parent -> Study : ipe-atlas-export-request
+Study --> Parent : response(state="INITIAL")
+Parent -> Parent : first valid response에서 break
+
+note right of Parent
+  globalAtlas에는 요청하지 않거나
+  응답을 비교하지 않는다. [S]
+end note
+
+Parent -> LS : Atlas = "INITIAL"
+Parent --> Sync : payload.atlas = "INITIAL"
+Sync -> Server : commit stale snapshot
+Server --> Sync : revision saved
+Sync -> LS : verified stale snapshot
+
+note over LS,Server
+  결과: 최신 global 상태와 기존 localStorage가
+  오래된 study 상태로 역행한다. [R]
+end note
+
+caption 결함 1 — 복사본에 공통 revision/freshness가 없어 배열 순서가 사실상 권위가 된다.
+@enduml

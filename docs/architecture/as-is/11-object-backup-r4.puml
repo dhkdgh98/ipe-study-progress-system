@@ -1,0 +1,66 @@
+@startuml
+!include _style.puml
+title AS-IS 11 — UML 객체: 제공된 revision 4 백업
+left to right direction
+
+object "revision4 : Payload" as R4 {
+  version = 2
+  format = <absent>
+  schemaVersion = <absent>
+  payloadHash = <absent>
+  fileBytes = 66601
+}
+
+object "app : AppState" as App {
+  progressItems = 27
+  noteItems = 0
+  settings.targetV2 = present
+}
+
+object "atlas : AtlasState" as Atlas {
+  concepts = 0
+  frames = 0
+  objects = 0
+  keywords = 0
+}
+
+object "bridge : BridgeState" as Bridge {
+  activeLinks = 148
+  orphanedLinks = 47
+  catalogItems = 157
+}
+
+object "activeLinks[*]" as Active {
+  role = "핵심" x 148
+  missingItemId = 0
+  missingConceptId = 0
+}
+
+object "orphanedLinks[*]" as Orphans {
+  reason = "missing_concept_body" x 47
+}
+
+R4 *-- App
+R4 *-- Atlas
+R4 *-- Bridge
+Bridge *-- Active
+Bridge *-- Orphans
+Active -[#red,dashed]-> Atlas : conceptId target 없음
+
+note right of R4
+  [F] schema v3 envelope가 아니므로
+  파일 내부 hash/version 검증을 할 수 없다.
+end note
+
+note bottom of Atlas
+  [F] Atlas 본문이 0개다.
+  이 파일은 전체 콘텐츠 canonical source가 아니다.
+end note
+
+note bottom of Active
+  [D] 현 RPC는 empty Atlas와
+  active/orphan links 조합을 거부한다.
+end note
+
+caption 실제 파일 관찰값이며 추정치가 아니다. App 데이터와 연결 목록은 있으나 Atlas 본문이 없다.
+@enduml

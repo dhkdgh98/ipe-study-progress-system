@@ -1,0 +1,48 @@
+@startuml
+!include _style.puml
+title AS-IS 09 — UML 시퀀스: 최초 연결과 충돌 정지
+
+actor User
+participant "Settings UI" as Settings
+participant "Normalized Sync" as Sync
+database "local meta/state" as Local
+participant "Supabase" as Server
+
+== Scenario A — 새 workspace 최초 연결 ==
+note over Local
+  기존 로컬 progress/Atlas 존재
+  serverRevision=0
+end note
+User -> Settings : URL/anonKey/syncKey 저장
+Settings -> Local : config 저장\nserverState=queued
+Settings -> Sync : startupCheck()
+Sync -> Server : ipe_load_head()
+Server --> Sync : remote head 없음
+Sync -> Local : serverState = dirty ? queued : empty
+Sync --> Settings : return
+
+note over Sync
+  commit timer를 만들지 않는다. [S][R]
+  기존 로컬 데이터는 자동 bootstrap되지 않는다.
+end note
+
+== Scenario B — 서버가 앞서고 로컬도 변경됨 ==
+note over Local,Server
+  local base revision=5, dirty=true
+  server head revision=6
+end note
+User -> Sync : 원격 불러오기
+Sync -> Local : dirty 확인
+Sync --> User : 차단: 저장되지 않은 로컬 변경
+User -> Sync : 지금 저장
+Sync -> Server : commit(expected=5)
+Server --> Sync : conflict(actual=6)
+Sync --> User : 다른 디바이스가 먼저 저장함
+
+note over User,Server
+  서버 버전 수용, 로컬 재기준화,
+  비교/병합 동작이 없다. [S]
+end note
+
+caption 결함 5·6 — bootstrap과 conflict resolution이 상태 문자열에서 끝나고 실행 가능한 전이가 없다.
+@enduml

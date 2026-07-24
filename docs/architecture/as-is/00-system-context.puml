@@ -1,0 +1,45 @@
+@startuml
+!include _style.puml
+title AS-IS 00 — 시스템 컨텍스트
+left to right direction
+
+actor "사용자" as User
+
+rectangle "IPE Learning OS\n브라우저 애플리케이션" as System {
+  component "학습 진도 App" as App
+  component "Concept Atlas" as Atlas
+  component "Bridge" as Bridge
+  component "통합 저장 UI/코디네이터" as Sync
+}
+
+cloud "정적 호스팅" as Hosting
+cloud "Supabase REST/RPC" as Supabase
+database "PostgreSQL\nrevision + projection" as DB
+file "JSON 백업 파일" as Backup
+rectangle "GitHub 저장소/배포" as GitHub
+
+User --> System : 학습·편집·저장·복구
+GitHub --> Hosting : 정적 파일 배포
+Hosting --> System : index.html / JS / SQL 안내
+System --> Supabase : anon key + syncKey 파생 ID\nRPC 호출
+Supabase --> DB : security definer 함수
+System --> Backup : 백업 내보내기
+Backup --> System : 백업 가져오기
+
+note bottom of System
+  [S] App·Atlas·Bridge는 브라우저에서 실행된다.
+  [S] 현재 사용자 계정 대신 공유 syncKey를 사용한다.
+  [F] 과거와 현재의 여러 JSON 형식이 존재한다.
+end note
+
+legend right
+  |= 표기 |= 근거 |
+  | [S] | 정적 코드 |
+  | [D] | DB/RPC |
+  | [F] | 실제 백업 |
+  | [R] | 런타임 재현 |
+  | [I] | 근거 기반 추론 |
+endlegend
+
+caption 기준 commit f15e1bd9802c98c43bc6f8c72e18572b9619db1f
+@enduml

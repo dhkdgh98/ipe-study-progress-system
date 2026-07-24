@@ -1,0 +1,52 @@
+@startuml
+!include _style.puml
+title AS-IS 10 — UML 시퀀스: 다중 탭과 종료·재실행 공백
+
+actor User
+participant "탭 A" as A
+participant "탭 B" as B
+database "공유 localStorage" as LS
+participant "Supabase" as Server
+participant "재실행 탭 C" as C
+
+== 같은 origin의 두 탭 ==
+A -> LS : state/meta 읽기
+B -> LS : 같은 state/meta 읽기
+User -> A : 데이터 편집
+A -> LS : local state + dirty
+A -> Server : commit revision 6
+Server --> A : success
+A -> LS : serverRevision=6
+
+note over B
+  BroadcastChannel, Web Lock,
+  storage event 처리 없음. [S]
+  B의 메모리는 이전 snapshot일 수 있다. [I]
+end note
+
+User -> B : 다른 데이터 편집
+B -> LS : B 메모리 기반 state 저장
+B -> Server : 이전 base revision으로 commit
+Server --> B : conflict 또는 stale 전체상태 시도
+
+== 종료 직전 ==
+User -> B : 편집 후 즉시 창 닫기
+B -> LS : Atlas beforeunload local save
+B -x Server : 대기 중 RPC 완료 보장 없음
+
+note over B
+  top-level 서버 미저장 경고와
+  영속 operation/outbox가 없다. [S]
+end note
+
+User -> C : 앱 다시 열기
+C -> LS : dirty/meta 읽기
+C -> Server : startup check 또는 새 operation
+
+note over C,Server
+  서버가 이전 요청을 수락했으나 ACK 기록 전 종료된 경우,
+  같은 operationId를 재사용할 정보가 없다. [I]
+end note
+
+caption 결함 12 및 추가 리스크 — 브라우저 탭과 프로세스 생명주기가 동기화 operation보다 짧다.
+@enduml

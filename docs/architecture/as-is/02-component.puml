@@ -1,0 +1,73 @@
+@startuml
+!include _style.puml
+title AS-IS 02 · 컴포넌트 UML: 저장 책임과 함수 교체
+top to bottom direction
+skinparam linetype polyline
+
+package "UI / 편집기" {
+  component "App UI\nprogress · notes · settings" as AppUI
+  component "Study Atlas iframe\n[결함 1]" as Study
+  component "Global Atlas iframe\n[결함 1]" as Global
+  component "Bridge helpers/cache\n[결함 7 · 11]" as Bridge
+  component "Topbar Save Status" as Topbar
+
+  AppUI -[hidden]right-> Study
+  Study -[hidden]right-> Global
+  Global -[hidden]right-> Bridge
+  Bridge -[hidden]right-> Topbar
+}
+
+package "현재 persistence 계층" {
+  component "Base App\nsave · saveUI" as BaseSave
+  component "v17\nflush · snapshot" as V17
+  component "Normalized Sync\ninstall · collect · validate · commit\n[결함 2 · 3 · 4 · 5 · 6 · 8 · 9 · 12]" as NS
+  component "Backup\nexport · import" as Backup
+  component "Legacy v13~v17 cloud\n[결함 10]" as Legacy
+
+  BaseSave -[hidden]right-> V17
+  V17 -[hidden]right-> NS
+  NS -[hidden]right-> Backup
+  Backup -[hidden]right-> Legacy
+}
+
+package "저장 어댑터" {
+  database "localStorage" as LS
+  component "Supabase RPC client" as Client
+  database "revision + projection" as DB
+  file "JSON backup" as File
+  database "legacy table" as LegacyDB
+
+  LS -[hidden]right-> Client
+  Client -[hidden]right-> DB
+  DB -[hidden]right-> File
+  File -[hidden]right-> LegacyDB
+}
+
+AppUI --> BaseSave : save()
+BaseSave --> LS : App state
+Study --> LS : Atlas 직접 저장
+Global --> LS : Atlas 직접 저장
+Study --> V17 : saved/export 응답
+Global --> V17 : saved/export 응답
+Bridge --> LS : Bridge state
+
+NS ..> BaseSave : runtime wrapper [S]
+NS ..> Legacy : cloud 함수 교체 [S]
+NS ..> Backup : export/import 교체 [S]
+NS --> V17 : flushAllStores()
+NS --> LS : collect · apply · meta
+NS --> Client : commit · load
+NS --> Topbar : 수동 상태 문자열
+Client --> DB
+Backup <--> File
+Backup --> LS : apply + pending
+Legacy --> LegacyDB
+
+legend bottom
+  실선 = 정상 호출/데이터 이동
+  점선 = 런타임 함수 교체
+  결함 번호의 근거와 재현 경로는 traceability.md 참조
+endlegend
+
+caption 단일 UI 아래에서 Base, v17, Legacy, Normalized 네 계층의 저장 책임이 겹친다.
+@enduml

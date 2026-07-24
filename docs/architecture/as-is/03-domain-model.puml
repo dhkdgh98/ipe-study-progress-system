@@ -1,0 +1,159 @@
+@startuml
+!include _style.puml
+title AS-IS 03 · 도메인 클래스와 저장 제약
+left to right direction
+
+class Payload {
+  version : 2
+  app : AppState
+  atlas : AtlasState
+  bridge : BridgeState
+}
+
+class AppState {
+  version : 4
+  progress : Map<ItemId, Progress>
+  notes : Map<ItemId, String>
+  settings : Object
+}
+
+class AtlasState {
+  concepts : Concept[*]
+  frames : Frame[*]
+  objects : AtlasObject[*]
+  keywords : String[*]
+}
+
+class BridgeState {
+  links : StudyConceptLink[*]
+  orphanedLinks : OrphanedLink[*]
+  catalog : CatalogItem[*]
+}
+
+class Concept {
+  id : String
+  title : String
+  conceptRole : core|support|general
+  importance : Number
+  primaryParent : ConceptId?
+  parents : ConceptId[*]
+  related : ConceptId[*]
+  sections : SectionMap
+  createdAt : DateTime?
+  updatedAt : DateTime?
+}
+
+class ConceptLine {
+  id : String
+  text : String
+  keywords : String[*]
+}
+
+class Frame {
+  id : String
+  type : String
+  anchorId : ConceptId?
+  members : EntityId[*]
+  config : Object
+}
+
+class AtlasObject {
+  id : String?
+  payload : Object
+}
+
+class CatalogItem {
+  id : String
+  subject : String
+  section : String
+  name : String
+}
+
+class StudyConceptLink {
+  itemId : ItemId
+  conceptId : ConceptId
+  role : String
+}
+
+class OrphanedLink {
+  itemId : ItemId
+  conceptId : MissingConceptId
+  role : String
+  reason : String
+  archivedAt : DateTime?
+}
+
+class Workspace {
+  syncId : String
+  writeHash : String
+  headRevision : Integer
+}
+
+class Revision {
+  revision : Integer
+  operationId : UUID
+  payloadHash : String
+  appState : JSON
+  atlasState : JSON
+  bridgeState : JSON
+}
+
+class SyncMeta {
+  serverRevision : Integer
+  lastPayloadHash : String
+  dirty : Boolean
+  generation : Integer
+  restorePending : Boolean
+}
+
+Payload "1" *-- "1" AppState
+Payload "1" *-- "1" AtlasState
+Payload "1" *-- "1" BridgeState
+AtlasState "1" *-- "0..*" Concept
+Concept "1" *-- "0..*" ConceptLine
+AtlasState "1" *-- "0..*" Frame
+AtlasState "1" *-- "0..*" AtlasObject
+BridgeState "1" *-- "0..*" StudyConceptLink
+BridgeState "1" *-- "0..*" OrphanedLink
+BridgeState "1" *-- "0..*" CatalogItem
+StudyConceptLink "0..*" --> "1" CatalogItem : itemId [S]
+StudyConceptLink "0..*" --> "1" Concept : conceptId [S][D]
+Concept "0..*" --> "0..*" Concept : parent · related
+Frame "0..*" --> "0..1" Concept : anchorId
+Frame "0..*" --> "0..*" Concept : member
+Frame "0..*" --> "0..*" AtlasObject : member
+Workspace "1" *-- "0..*" Revision
+SyncMeta ..> Workspace
+
+note right of ConceptLine
+  [D] SQL PK는 (sync_id, line_id).
+  line ID는 workspace 전체에서 유일해야 한다.
+end note
+
+note right of StudyConceptLink
+  결함 11 [D]
+  DB PK = (sync_id,item_id,concept_id).
+  같은 pair의 다중 role은 projection에서 축약된다.
+end note
+
+note bottom of Concept
+  projection 손실 [D]
+  primaryParent, 관계 배열 순서,
+  임의 확장 필드는 normalized table에서
+  완전히 표현되지 않는다.
+end note
+
+note bottom of Frame
+  [D] anchor FK는 delete set null.
+  member의 다형 참조는 entity FK 대신
+  RPC assert에 의존한다.
+end note
+
+note bottom of SyncMeta
+  결함 3 [S]
+  META_KEY 하나에 revision/hash가 저장되어
+  workspace 변경 뒤 이전 값이 남을 수 있다.
+end note
+
+caption revision JSON과 normalized projection은 현재 동일한 표현력을 갖지 않는다.
+@enduml
