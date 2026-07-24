@@ -641,6 +641,10 @@ begin
     return query select v_history_id,v_now,true;
     return;
   end if;
+  -- SELECT INTO clears its targets when no row is found. Restore the durable
+  -- operation ID before inserting the first copy of this named snapshot.
+  v_history_id := p_operation_id;
+  v_now := now();
 
   insert into public.ipe_history_snapshots(
     sync_id,history_id,operation_id,source_revision,device_id,device_alias,

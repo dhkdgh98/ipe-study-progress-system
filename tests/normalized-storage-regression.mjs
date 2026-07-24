@@ -27,6 +27,7 @@ assert.match(sql,/create table if not exists public\.ipe_history_snapshots/,'nam
 assert.match(sql,/create table if not exists public\.ipe_revisions/,'legacy append-only revision history must remain available during migration');
 assert.doesNotMatch(sql,/delete from public\.ipe_revisions/,'revision history must not be overwritten');
 assert.match(sql,/create or replace function public\.ipe_create_history_snapshot/,'named history creation must be independent from working commits');
+assert.match(sql,/if found then[\s\S]*return;[\s\S]*v_history_id := p_operation_id;/,'a missing idempotency row must restore the history id cleared by SELECT INTO');
 assert.match(sql,/create or replace function public\.ipe_load_history/,'a selected named snapshot must be readable for recovery');
 assert.match(sql,/client upgrade required: protocol 3/,'obsolete write clients must be rejected by the server');
 
